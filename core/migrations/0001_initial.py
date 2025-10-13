@@ -4,7 +4,6 @@ import core.models
 import django.contrib.auth.models
 import django.core.validators
 import django.db.models.deletion
-import storages.backends.s3
 import uuid
 from decimal import Decimal
 from django.conf import settings
@@ -310,7 +309,7 @@ class Migration(migrations.Migration):
             name='ClientFile',
             fields=[
                 ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('file', models.FileField(storage=storages.backends.s3.S3Storage(), upload_to='client_files/')),
+                ('file', models.FileField(upload_to='client_files/')),
                 ('file_type', models.CharField(editable=False, max_length=50)),
                 ('uploaded_at', models.DateTimeField(auto_now_add=True)),
                 ('uploaded_by', models.CharField(choices=[('user', 'User'), ('admin', 'Admin')], default='user', help_text='Who uploaded the file: admin or user', max_length=10)),
