@@ -17,7 +17,6 @@ from core.validators import clean_phone, clean_ab_postal_code
 from django.conf import settings
 
 
-from storages.backends.s3boto3 import S3Boto3Storage
 from django.utils.text import slugify
 
 
@@ -1461,7 +1460,7 @@ class ClientFile(models.Model):
     ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(UserProfile, on_delete=models.CASCADE)
-    file = models.FileField(upload_to='client_files/', storage=S3Boto3Storage()) # stored in S3!
+    file = models.FileField(upload_to='client_files/')
     file_type = models.CharField(max_length=50, editable=False)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.CharField(
