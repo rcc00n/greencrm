@@ -20,7 +20,9 @@ environ.Env.read_env(BASE_DIR / ".env")
 # --------------------------------------------------------------------------------------
 SECRET_KEY = env("SECRET_KEY", default="replace-me-in-production")
 DEBUG = env.bool("DEBUG", default=True)
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
+if not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["*"]
 
 
 # --------------------------------------------------------------------------------------
