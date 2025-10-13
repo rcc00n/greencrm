@@ -1,0 +1,132 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{% block breadcrumbs %}{% endblock %}
+{% block content_title %}{% endblock %}
+{% block object-tools %}{% endblock %}
+{% block title %}Daily Calendar{% endblock %}
+{% block extrahead %}
+    <script defer src="{% static 'admin/js/appointments.js' %}"></script>
+    <link rel="stylesheet" href="{% static 'admin/css/custom_sidebar.css' %}">
+    <script defer src="{% static 'admin/js/custom_sidebar.js' %}"></script>
+{% endblock %}
+{% block extrastyle %}
+    <link rel="stylesheet" href="{% static 'admin/css/appointments.css' %}">
+{% endblock %}
+{% block content %}
+    <div style="text-align: center; height: 100%; width: 100%; background: rgba(239,239,239,0.52);">
+        <div class="calendar-nav">
+            <div class="calendar-left">
+                <button class="nav-btn" onclick="changeDateToToday()">Today</button>
+
+                <div class="nav-group">
+                    <button class="nav-icon2" onclick="changeDateByDays(-1)">&lt;</button>
+                    <div class="fake-date-picker" onclick="document.getElementById('realDateInput').showPicker()">
+                        <span id="displayDate">{{ selected_date|date:"Y-m-d" }}</span>
+                        <input
+                                type="date"
+                                id="realDateInput"
+                                value="{{ selected_date|date:'Y-m-d' }}"
+                                onchange="onDateChange(this.value)"
+                        />
+                    </div>
+                    <button class="nav-icon2" onclick="changeDateByDays(1)">&gt;</button>
+                </div>
+
+                <button class="nav-icon2" id="nav-icon2" style="border-radius: 10px;">
+                    <img src="https://img.icons8.com/?size=100&id=O7hGF9n2ssaW&format=png&color=000000"
+                         alt="Filter" style="width: 2.2vh; height: 2.2vh;">
+                </button>
+            </div>
+
+            <div class="calendar-right">
+
+                {% if export_url_xlsx %}
+                    <button onclick='window.location.href="{{ export_url_xlsx }}"' class="add-appointment-btn" style="text-decoration:none; width:13vh; margin-right: 1vh;">
+                        Export CSV
+                    </button>
+                {% endif %}
+
+
+                <div class="add-dropdown">
+                    <button id="addDropdownBtn" class="add-appointment-btn">Add <span id="arrow">▾</span></button>
+                    <div id="addDropdownMenu" class="add-dropdown-menu hidden">
+                        <a href="#" onclick="handleAdd('appointment')">📅 Appointment</a>
+
+                        <a href="#" onclick="handleAdd('vacation')">❌ Blocked time</a>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Sidebar -->
+    <div id="filterSidebar" class="sidebar2 hidden">
+        <div class="sidebar-header2">
+            <h3>All filters</h3>
+            <button class="close-btn2" onclick="closeSidebar()">✕</button>
+        </div>
+
+
+        <form id="filterForm">
+            <div class="filter-section">
+                <div class="filter-header" onclick="toggleSection(this)">
+                    📅 Appointment status <span class="arrow">⌄</span>
+                </div>
+                <div class="filter-content">
+                    {% for status in appointment_statuses %}
+                        <label class="checkbox-wrapper">
+                            <input type="checkbox" name="status" value="{{ status.id }}">
+                            <span>{{ status.name }}</span>
+                        </label>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-header" onclick="toggleSection(this)">
+                    💳 Payment status <span class="arrow">⌄</span>
+                </div>
+                <div class="filter-content">
+                    {% for ps in payment_statuses %}
+                        <label class="checkbox-wrapper">
+                            <input type="checkbox" name="payment_status" value="{{ ps.id }}">
+                            <span>{{ ps.name }}</span>
+                        </label>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-header" onclick="toggleSection(this)">
+                    🏷️ Services <span class="arrow">Edit</span>
+                </div>
+                <div class="filter-content">
+                    <select name="service" id="serviceSelect">
+                        <option value="">All</option>
+                        {% for service in services %}
+                            <option value="{{ service.id }}">{{ service.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <div class="filter-footer">
+                <button type="submit" class="apply-btn">Apply filters</button>
+                <button type="button" onclick="clearAllFilters()" class="clear-btn">Clear filters</button>
+            </div>
+        </form>
+    </div>
+    <div id="calendar-container">
+        {% include "admin/appointments_calendar_partial.html" %}
+    </div>
+    <div id="addPopup" class="popup hidden">
+        <div class="popup-header">
+            <span id="popupTime">Time</span>
+            <button class="popup-close" onclick="closePopup()">✕</button>
+        </div>
+        <div class="popup-body">
+        </div>
+    </div>
+    <div id="apptTooltip" class="appt-tooltip hidden"></div>
+
+{% endblock %}

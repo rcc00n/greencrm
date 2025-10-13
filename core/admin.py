@@ -1,0 +1,4093 @@
+from bisect import bisect_left
+from collections import defaultdict
+from decimal import Decimal
+from io import BytesIO
+from typing import Dict, Any, List, Sequence, Iterable
+from urllib.parse import urlencode
+
+from django.contrib.admin import DateFieldListFilter
+
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.core.exceptions import FieldError, PermissionDenied
+from django.db import transaction, IntegrityError
+from django.template.loader import render_to_string
+from django.template.response import TemplateResponse
+from django.contrib import admin, messages
+from django.db.models import Sum, Count, Q, F, ExpressionWrapper, IntegerField, Prefetch
+from itertools import cycle
+
+from django.utils.formats import number_format
+from django.utils.timezone import localtime, datetime, make_aware, localdate, get_current_timezone, make_naive, is_aware
+from django.utils.html import escape
+from core.utils.admin_perms import is_master, master_obj
+from django.shortcuts import redirect, get_object_or_404
+from django.utils.html import format_html, format_html_join
+from django.utils.safestring import mark_safe
+from datetime import date, timedelta, time as time_cls
+from django.contrib.admin.views.decorators import staff_member_required
+from django.http import HttpRequest, HttpResponse, Http404
+from django.contrib.auth.models import Permission
+from django.db.models.functions import Coalesce, Concat, Greatest
+from django.db.models import DecimalField, Value
+from django.contrib.contenttypes.models import ContentType
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+import json
+from django.utils.dateparse import parse_date
+import csv
+from django.utils.translation import gettext_lazy as _
+from django.urls import path, reverse, NoReverseMatch, re_path
+from django.http import HttpResponse
+from django.shortcuts import render
+from .filters import *
+from .models import *
+from .forms import *
+from .validators import *
+from core.services.user_import import (
+    import_users_from_file,
+    UserImportError,
+    UserImportSchemaError,
+)
+
+# -----------------------------
+# Custom filter for filtering users by Role
+# -----------------------------
+
+# Переопределение index view
+from datetime import timedelta
+from django.contrib import admin
+from django.db.models import Count, Sum, Q, F
+from django.template.response import TemplateResponse
+from django.utils import timezone
+from django.utils.timezone import localdate
+from datetime import timezone as py_tz
+
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment, numbers
+
+
+def _coerce_json(value):
+    if isinstance(value, dict):
+        return {k: _coerce_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_coerce_json(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time_cls):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+from core.models import (
+    Appointment, AppointmentItem, Payment,
+    AppointmentStatus, Role, MasterProfile, Service,
+    ClientIntakeForm, ClientIntakeFormSubmission,
+)
+
+
+def custom_index(request):
+    today = localdate()
+    now = timezone.now()
+    week_ago = today - timedelta(days=6)
+    week_days = [today - timedelta(days=6 - i) for i in range(7)]
+    first_day = today.replace(day=1)
+
+    # Базовые QS
+    appts_7d = Appointment.objects.filter(start_time__date__range=[week_ago, today])
+    payments_7d = Payment.objects.filter(appointment__start_time__date__range=[week_ago, today])
+
+    # Роль/профиль мастера
+    userprof = getattr(request.user, "userprofile", None)
+
+    master_profile = getattr(userprof, "master_profile", None) if userprof else None
+
+    # График продаж/записей за 7 дней
+    chart_data, total_sales = [], 0.0
+    for i in range(7):
+        day = today - timedelta(days=6 - i)
+        sales = payments_7d.filter(appointment__start_time__date=day) \
+                    .aggregate(total=Sum("amount"))["total"] or 0
+        appts = appts_7d.filter(start_time__date=day).distinct().count()
+        total_sales += float(sales)
+
+        chart_data.append({"day": day.strftime("%a %d"), "sales": float(sales), "appointments": appts})
+
+    # Статусы и счётчики на ближайшие 7 дней
+
+    confirmed = AppointmentStatus.objects.filter(name="Confirmed").first()
+    cancelled = AppointmentStatus.objects.filter(name="Cancelled").first()
+
+    # Подзапрос «последний статус для визита»
+    last_status_sq_items = (
+        AppointmentStatusHistory.objects
+        .filter(appointment_id=OuterRef("appointment_id"))
+        .order_by("-set_at")
+        .values("status_id")[:1]
+    )
+
+    # берём позиции ближайшей недели (как и было), но аннотируем последний статус визита
+    upcoming_items = (
+        AppointmentItem.objects
+        .filter(start_time__date__range=(today, today + timedelta(days=7)))
+        .annotate(last_status_id=Subquery(last_status_sq_items))
+    )
+
+    # считаем КОЛ-ВО ВИЗИТОВ (distinct по appointment_id), где последний статус == нужному
+    confirmed_count = (
+        upcoming_items
+        .filter(last_status_id=getattr(confirmed, "id", None))
+        .values("appointment_id")
+        .distinct()
+        .count()
+    ) if confirmed else 0
+
+    cancelled_count = (
+        upcoming_items
+        .filter(last_status_id=getattr(cancelled, "id", None))
+        .values("appointment_id")
+        .distinct()
+        .count()
+    ) if cancelled else 0
+
+
+# Top services (текущий месяц) — считаем позиции у Service через обратную связь "appointmentitem"
+    top_services = (
+        Service.objects.annotate(
+            count=Count(
+                "appointmentitem",
+                filter=Q(appointmentitem__appointment__start_time__date__gte=first_day),
+            )
+        )
+        .order_by("-count")[:10]
+    )
+    first_day = localdate().replace(day=1)
+    if first_day.month == 12:
+        first_day_next = date(first_day.year + 1, 1, 1)
+    else:
+        first_day_next = date(first_day.year, first_day.month + 1, 1)
+
+    # 2) Агрегация денег по мастеру из AppointmentItem.final_price
+    paid_by_appt = dict(
+        Payment.objects
+        .filter(created_at__date__gte=first_day, created_at__date__lt=first_day_next)
+        .values("appointment_id")
+        .annotate(total=Coalesce(Sum("amount"), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))))
+        .values_list("appointment_id", "total")
+    )
+
+    if not paid_by_appt:
+        top_masters = []
+    else:
+    # 3) Сумма final_price по мастеру в каждом визите из оплаченных
+        rows = (
+            AppointmentItem.objects
+            .filter(appointment_id__in=paid_by_appt.keys())
+            .values("appointment_id", "master_id")
+            .annotate(msum=Coalesce(Sum("final_price"), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))))
+        )
+
+        # 4) Сумма final_price по визиту (для нормализации долей мастеров)
+        appt_total = {}
+        for r in rows:
+            aid = r["appointment_id"]
+            appt_total[aid] = (appt_total.get(aid, 0) or 0) + (r["msum"] or 0)
+
+        # 5) Распределяем деньги визита пропорционально долям мастеров
+        master_totals = {}
+        for r in rows:
+            aid = r["appointment_id"]
+            mid = r["master_id"]
+            msum = r["msum"] or 0
+            paid = paid_by_appt.get(aid, 0) or 0
+            total = appt_total.get(aid, 0) or 0
+            if paid and total > 0 and msum > 0:
+                part = paid * (msum / total)
+                master_totals[mid] = (master_totals.get(mid, 0) or 0) + part
+
+        # 6) Топ-10 мастеров по начисленной сумме
+        top_ids = sorted(master_totals.keys(), key=lambda k: master_totals[k], reverse=True)[:10]
+        top_masters_qs = MasterProfile.objects.filter(pk__in=top_ids).select_related("user")
+        top_masters = list(top_masters_qs)
+        for m in top_masters:
+            m.total = master_totals.get(m.pk, 0)
+
+        # Сохранить порядок по total
+        top_masters = sorted(top_masters, key=lambda m: m.total or 0, reverse=True)[:10]
+
+    # Недавние встречи (20) с префетчем позиций
+    recent_appointments = (
+        AppointmentItem.objects.select_related("appointment__client__user").order_by("-start_time")[:20]
+    )
+
+    # Сегодняшние предстоящие встречи (Appointment + items); мастеру — только его
+    today_appointments = (
+        AppointmentItem.objects.filter(start_time__date=today, start_time__gte=now)
+        .select_related("appointment__client__user")
+        .order_by("start_time")
+    )
+    if is_master(request.user) and master_profile:
+        today_appointments = today_appointments.filter(master=master_profile).distinct()
+
+    # Ежедневная разбивка Confirmed/Cancelled (на 7 дней вперёд)
+    daily_counts = []
+    for day in week_days:
+        c = Appointment.objects.filter(start_time__date=day,
+                                       appointmentstatushistory__status=confirmed) \
+            .distinct().count() if confirmed else 0
+        x = Appointment.objects.filter(start_time__date=day,
+                                       appointmentstatushistory__status=cancelled) \
+            .distinct().count() if cancelled else 0
+        daily_counts.append({"day": day.strftime("%a %d"), "confirmed": c, "cancelled": x})
+
+    context = admin.site.each_context(request)
+    context.update({
+        "is_master": is_master(request.user),
+        "daily_appointments": daily_counts,
+        "chart_data": chart_data,
+        "total_sales": total_sales,
+        "upcoming_total": upcoming_items.count(),
+        "confirmed_count": confirmed_count,
+        "cancelled_count": cancelled_count,
+        "top_services": top_services,      # Service с .name и .count
+        "top_masters": top_masters,        # MasterProfile с .total
+        "today": today,
+        "recent_appointments": recent_appointments,
+        "today_appointments": today_appointments,
+    })
+    return TemplateResponse(request, "admin/index.html", context)
+
+# Переопределить главную страницу
+admin.site.index = custom_index
+class ExportCsvMixin:
+    export_fields = None  # список полей; можно переопределить в admin
+
+    def get_urls(self):
+        opts = self.model._meta
+        return [
+            path(
+                "export-csv/",
+                self.admin_site.admin_view(self.export_all_csv),
+                name=f"{opts.app_label}_{opts.model_name}_export_csv"
+            )
+        ] + super().get_urls()
+
+    def export_all_csv(self, request):
+        queryset = self.get_queryset(request)
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename={self.model._meta.model_name}.csv'
+
+        fields = self.export_fields or [field.name for field in self.model._meta.fields]
+        writer = csv.writer(response)
+        writer.writerow(fields)
+
+        for obj in queryset:
+            if hasattr(self, 'get_export_row'):
+                row = self.get_export_row(obj)
+            else:
+                row = [getattr(obj, field) for field in fields]
+            writer.writerow(row)
+
+        return response
+
+    def changelist_view(self, request, extra_context=None):
+        # Попробуем reverse без краша
+        extra_context = extra_context or {}
+        try:
+            opts = self.model._meta
+            export_url = reverse(f'admin:{opts.app_label}_{opts.model_name}_export_csv')
+            export_url += f"?{request.GET.urlencode()}"
+            extra_context['export_url'] = export_url
+        except NoReverseMatch:
+            extra_context['export_url'] = None
+
+        return super().changelist_view(request, extra_context=extra_context)
+
+
+
+class ExportXlsxMixin:
+    """
+    Универсальный XLSX-экспорт для Django Admin.
+    Дает:
+      - URL 'export-xlsx/' для полной выгрузки текущего changelist с учетом фильтров
+      - Экшены: export_appointments_xlsx / export_appointment_items_xlsx
+    Подключение: наследуй нужный ModelAdmin от этого миксина.
+    """
+
+    # ============ ПУБЛИЧНЫЕ ТОЧКИ ============
+
+    def get_urls(self):
+        opts = self.model._meta
+        return [
+            path(
+                "export-xlsx/",
+                self.admin_site.admin_view(self._export_all_xlsx_view),
+                name=f"{opts.app_label}_{opts.model_name}_export_xlsx",
+            ),
+        ] + super().get_urls()
+
+    # Экшен: 1 строка = 1 Appointment
+    def export_appointments_xlsx(self, request, queryset):
+        qs = self._qs_for_export(request, queryset)
+        headers = [
+            "Appointment ID",
+            "Start",
+            "Client",
+            "Status",
+            "Payment Status",
+            "Personal Discount",
+            "Items Count",
+            "Total (sum of items)",
+            "Items (preview)",
+        ]
+        rows = []
+        for appt in qs:
+            items = getattr(appt, "appointmentitem_set").all()
+            total = sum([(getattr(it, "final_price", None) or 0) for it in items])
+            preview = " | ".join(
+                f"{getattr(getattr(it, 'service', None), 'name', getattr(it, 'service', ''))} ×{getattr(it, 'quantity', 1)}"
+                for it in items[:6]
+            )
+            if items.count() > 6:
+                preview += " …"
+            rows.append([
+                str(getattr(appt, "pk", "")),
+                self._to_naive_dt(getattr(appt, "start_time", None)),
+                self._client_name(getattr(appt, "client", None)),
+                self._safe_str(getattr(appt, "status", "")),
+                self._safe_str(getattr(appt, "payment_status", "")),
+                getattr(appt, "personal_discount", None),
+                items.count(),
+                self._as_decimal(total),
+                preview,
+            ])
+
+        # Start = колонка 2 (datetime), Total = колонка 8 (денежный)
+        return self._xlsx_response(
+            "appointments.xlsx", "Appointments", headers, rows,
+            money_cols={8}, datetime_cols={2}
+        )
+
+    export_appointments_xlsx.short_description = "Export Appointments (XLSX, 1 row per appointment)"
+
+    # Экшен: 1 строка = 1 Appointment Item
+    def export_appointment_items_xlsx(self, request, queryset):
+        qs = self._qs_for_export(request, queryset)
+        headers = [
+            "Appointment ID",
+            "Item ID",
+            "Item Start",
+            "Service",
+            "Master",
+            "Quantity",
+            "Unit Price",
+            "Service Discount",
+            "Promocode",
+            "Final Price",
+            "Client",
+            "Appointment Status",
+            "Payment Status",
+            "Personal Discount (Appointment)",
+        ]
+        rows = []
+        for appt in qs:
+            items = getattr(appt, "appointmentitem_set").all()
+            for it in items:
+                rows.append([
+                    str(getattr(appt, "pk", "")),
+                    str(getattr(it, "pk", "")),
+                    self._to_naive_dt(getattr(it, "start_time", None)),
+                    self._safe_str(getattr(getattr(it, "service", None), "name", getattr(it, "service", ""))),
+                    self._safe_str(getattr(getattr(it, "master", None), "short_name",
+                                           getattr(getattr(getattr(it, "master", None), "user", None), "username", ""))),
+                    getattr(it, "quantity", 1),
+                    self._as_decimal(getattr(it, "unit_price", None)),
+                    self._safe_str(getattr(getattr(it, "service_discount", None), "name", getattr(it, "service_discount", ""))),
+                    self._safe_str(getattr(getattr(it, "promocode", None), "code", getattr(it, "promocode", ""))),
+                    self._as_decimal(getattr(it, "final_price", None)),
+                    self._client_name(getattr(appt, "client", None)),
+                    self._safe_str(getattr(appt, "status", "")),
+                    self._safe_str(getattr(appt, "payment_status", "")),
+                    getattr(appt, "personal_discount", None),
+                ])
+
+        # Item Start = 3 (datetime), Unit Price = 7, Final Price = 10 (денежные)
+        return self._xlsx_response(
+            "appointment_items.xlsx", "Items", headers, rows,
+            money_cols={7, 10}, datetime_cols={3}
+        )
+
+    export_appointment_items_xlsx.short_description = "Export Appointment Items (XLSX, 1 row per item)"
+
+    # Зарегистрируй экшены в админ-классе:
+    # actions = ["export_appointments_xlsx", "export_appointment_items_xlsx"]
+
+    # ============ ВСПОМОГАТЕЛЬНОЕ ============
+
+    def _export_all_xlsx_view(self, request):
+        """
+        Полная выгрузка текущего списка (как в changelist, с учетом фильтров).
+        По умолчанию — 1 строка = 1 объект self.model с его ._meta.fields.
+        """
+        queryset = self.get_queryset(request)
+        fields = [f.name for f in self.model._meta.fields]
+        headers = fields
+        rows = ([self._xlsx_safe(getattr(obj, f)) for f in fields] for obj in queryset)
+        return self._xlsx_response(f"{self.model._meta.model_name}.xlsx", "Export", headers, rows)
+
+    def _qs_for_export(self, request, queryset=None):
+        """
+        Оптимизация выборки для экшенов по встречам и их позициям.
+        Переопредели под свою модель при необходимости.
+        """
+        qs = (queryset or self.get_queryset(request)).select_related(
+            "client",
+        ).prefetch_related(
+            "appointmentitem_set__service",
+            "appointmentitem_set__master",
+            "appointmentitem_set__promocode",
+            "appointmentitem_set__service_discount",
+        )
+        return qs
+
+    # ============ НИЗКИЙ УРОВЕНЬ (XLSX) ============
+
+    def _xlsx_response(
+            self,
+            filename: str,
+            sheet_title: str,
+            headers: Sequence[str],
+            rows: Iterable[Sequence],
+            *,
+            money_cols: set[int] | None = None,
+            datetime_cols: set[int] | None = None,
+    ) -> HttpResponse:
+        """
+        Возвращает HttpResponse с XLSX.
+        money_cols / datetime_cols — 1-based индексы колонок для number_format.
+        """
+        money_cols = money_cols or set()
+        datetime_cols = datetime_cols or set()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = sheet_title[:31] if sheet_title else "Export"
+
+        # Заголовок
+        ws.append(list(headers))
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(vertical="center")
+
+        # Данные
+        row_idx = 1
+        for row in rows:
+            row_idx += 1
+            safe_row = [self._xlsx_safe(v) for v in row]
+            ws.append(safe_row)
+
+            # Форматы
+            for col_idx, _ in enumerate(headers, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if col_idx in money_cols and isinstance(cell.value, (int, float, Decimal)):
+                    cell.number_format = numbers.FORMAT_CURRENCY_USD_SIMPLE
+                if col_idx in datetime_cols and isinstance(cell.value, datetime):
+                    cell.number_format = "yyyy-mm-dd hh:mm"
+
+        # Авто-ширина
+        for col_idx in range(1, ws.max_column + 1):
+            letter = get_column_letter(col_idx)
+            max_len = 0
+            for cell in ws[letter]:
+                v = "" if cell.value is None else str(cell.value)
+                if len(v) > max_len:
+                    max_len = len(v)
+            ws.column_dimensions[letter].width = min(max_len + 2, 60)
+
+        buff = BytesIO()
+        wb.save(buff)
+        buff.seek(0)
+
+        resp = HttpResponse(
+            buff.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+        resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+
+    # ============ ПРИВЕДЕНИЕ ТИПОВ ============
+
+    def _xlsx_safe(self, v):
+        """Конвертирует произвольные значения в Excel-дружелюбные."""
+        if v is None:
+            return ""
+        # datetime → naive (локальная TZ), time → без tzinfo
+        if isinstance(v, datetime):
+            return self._to_naive_dt(v)
+        if isinstance(v, time_cls):
+            # Excel не поддерживает tz-aware time; сбрасываем tzinfo
+            return time_cls(v.hour, v.minute, v.second, v.microsecond)
+        if isinstance(v, (date, )):
+            return v
+        if isinstance(v, (str, int, float, bool, Decimal)):
+            return v
+        # Модели/Enums/Objects → строка (использует __str__)
+        return str(v)
+
+    def _to_naive_dt(self, dt: datetime) -> datetime | None:
+        """Excel не любит tz-aware; переводим в naive (settings.TIME_ZONE)."""
+        if not isinstance(dt, datetime):
+            return dt
+        return make_naive(dt) if is_aware(dt) else dt
+
+    def _as_decimal(self, v):
+        if v is None:
+            return None
+        if isinstance(v, Decimal):
+            return v
+        if isinstance(v, (int, float)):
+            return Decimal(str(v))
+        try:
+            return Decimal(str(v))
+        except Exception:
+            return str(v)
+
+    def _safe_str(self, v, default=""):
+        return default if v in (None, "") else str(v)
+
+    def _client_name(self, client):
+        if client is None:
+            return ""
+        full = getattr(client, "full_name", "")
+        if full:
+            return full
+        user = getattr(client, "user", None)
+        return getattr(user, "username", "") if user else ""
+
+    def _wb_new(self) -> Workbook:
+        wb = Workbook()
+        wb.remove(wb.active)  # удаляем дефолтный пустой лист
+        return wb
+
+    def _append_sheet(self, wb: Workbook, title: str, headers, rows, *, money_cols=None, datetime_cols=None):
+        money_cols = set(money_cols or [])
+        datetime_cols = set(datetime_cols or [])
+
+        ws = wb.create_sheet(title=title[:31] or "Export")
+        ws.append(list(headers))
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(vertical="center")
+
+        row_idx = 1
+        for row in rows:
+            row_idx += 1
+            safe_row = [self._xlsx_safe(v) for v in row]
+            ws.append(safe_row)
+
+            for col_idx, _ in enumerate(headers, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if col_idx in money_cols and isinstance(cell.value, (int, float, Decimal)):
+                    cell.number_format = numbers.FORMAT_CURRENCY_USD_SIMPLE
+                if col_idx in datetime_cols and isinstance(cell.value, datetime):
+                    cell.number_format = "yyyy-mm-dd hh:mm"
+                if col_idx in datetime_cols and isinstance(cell.value, date) and not isinstance(cell.value, datetime):
+                    cell.number_format = "yyyy-mm-dd"
+
+        # авто-ширина
+        for col_idx in range(1, ws.max_column + 1):
+            letter = get_column_letter(col_idx)
+            max_len = 0
+            for c in ws[letter]:
+                s = "" if c.value is None else str(c.value)
+                if len(s) > max_len:
+                    max_len = len(s)
+            ws.column_dimensions[letter].width = min(max_len + 2, 60)
+
+        return ws
+
+    def _wb_response(self, wb: Workbook, filename: str) -> HttpResponse:
+        buff = BytesIO()
+        wb.save(buff)
+        buff.seek(0)
+        resp = HttpResponse(
+            buff.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+        resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+
+    def build_statistics_workbook(
+            self,
+            *,
+            start, end,
+            kpi_total_revenue, kpi_total_appointments, kpi_with_discount,
+            top_bookers, top_spenders, ds_totals,
+            discount_breakdown, promo_breakdown, client_source_table,
+    ):
+        """
+        Собирает многолистовую книгу XLSX из данных статистики.
+        На вход подаются готовые QuerySet/списки, которые уже посчитаны в stats_view.
+        """
+        wb = self._wb_new()
+
+        # KPI
+        self._append_sheet(
+            wb, "KPI",
+            headers=["Start", "End", "Total Revenue", "Appointments", "With Discount"],
+            rows=[[start, end, kpi_total_revenue, kpi_total_appointments, kpi_with_discount]],
+            money_cols={3}, datetime_cols={1, 2},
+        )
+
+        # Top Bookers
+        self._append_sheet(
+            wb, "Top Bookers",
+            headers=["Client ID", "First Name", "Last Name", "Email", "Appointments", "Spent"],
+            rows=[
+                [
+                    r["client_id"],
+                    r["client__user__first_name"],
+                    r["client__user__last_name"],
+                    r["client__user__email"],
+                    r["appt_count"],
+                    r["spent"],
+                ] for r in top_bookers
+            ],
+            money_cols={6},
+        )
+
+        # Top Spenders
+        self._append_sheet(
+            wb, "Top Spenders",
+            headers=["Client ID", "First Name", "Last Name", "Email", "Spent", "Appointments"],
+            rows=[
+                [
+                    r["client_id"],
+                    r["client__user__first_name"],
+                    r["client__user__last_name"],
+                    r["client__user__email"],
+                    r["spent"],
+                    r["appt_count"],
+                ] for r in top_spenders
+            ],
+            money_cols={5},
+        )
+
+        # Discount Sources totals
+        self._append_sheet(
+            wb, "Discount Sources",
+            headers=["Discount Source", "Appointments (distinct)", "Revenue"],
+            rows=[[r["discount_source"], r["cnt"], r["revenue"]] for r in ds_totals],
+            money_cols={3},
+        )
+
+        # ServiceDiscount breakdown
+        self._append_sheet(
+            wb, "ServiceDiscount",
+            headers=["ServiceDiscount", "Service", "Uses", "Revenue(by items)", "Saved"],
+            rows=[
+                [str(d), getattr(d.service, "name", ""), d.uses, d.revenue, d.saved]
+                for d in discount_breakdown
+            ],
+            money_cols={4, 5},
+        )
+
+        # Promo breakdown
+        self._append_sheet(
+            wb, "Promo",
+            headers=["Code", "Uses", "Revenue (share)"],
+            rows=[[r["code"], r["uses"], r["revenue"]] for r in promo_breakdown],
+            money_cols={3},
+        )
+
+        # Client Source
+        self._append_sheet(
+            wb, "Client Source",
+            headers=["Key", "Label", "Revenue", "Appointments", "Clients"],
+            rows=[
+                [r["key"], r["label"], r["revenue"], r["appts"], r["clients"]]
+                for r in client_source_table
+            ],
+            money_cols={3},
+        )
+
+        return wb
+
+
+# -----------------------------
+# Customized User Admin
+# -----------------------------
+class CustomUserAdmin(ExportCsvMixin ,BaseUserAdmin):
+    """
+    Custom admin interface for Django's User model, enhanced with roles and profile fields.
+    """
+    add_form = CustomUserCreationForm
+    form = CustomUserChangeForm
+    export_fields = ['username', 'email', 'first_name', 'last_name', 'phone', 'birth_date', 'address', 'postal_code', 'is_staff', 'is_superuser', 'is_active', 'source', 'consent']
+
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': (
+                'username', 'usable_password', 'password1', 'password2',
+                'email', 'first_name', 'last_name',
+                'phone', 'birth_date', 'address', 'postal_code',
+                'personal_discount_percent', 'how_heard', 'email_marketing_consent',
+                'notes',
+                'is_active', 'is_staff', 'is_superuser', 'groups',
+            ),
+        }),
+        ('Health', {
+            'classes': ('collapse',),
+            'fields': (
+                'has_allergies', 'allergies_text', 'gender',
+                'chronic_conditions', 'medications', 'pregnant',
+                'skin_sensitivity', 'recent_procedures',
+                'contraindications', 'health_notes',
+            ),
+        }),
+    )
+
+    def get_export_row(self, obj):
+        phone = obj.userprofile.phone if hasattr(obj, 'userprofile') else ''
+        birth_date = obj.userprofile.birth_date if hasattr(obj, 'userprofile') else ''
+        address = obj.userprofile.address if hasattr(obj, 'userprofile') else ''
+        postal_code = obj.userprofile.postal_code if hasattr(obj, 'userprofile') else ''
+        source = obj.userprofile.source if hasattr(obj, 'userprofile') else ''
+        consent = obj.userprofile.email_marketing_consent if hasattr(obj, 'userprofile') else ''
+
+        return [
+            obj.username,
+            obj.email,
+            obj.first_name,
+            obj.last_name,
+            phone,
+            birth_date,
+            address,
+            postal_code,
+            obj.is_staff,
+            obj.is_superuser,
+            obj.is_active,
+            source,
+            consent
+        ]
+    # Fields shown when adding a new user
+
+
+    # Fields shown in user list
+    list_display = ('username', 'email', 'first_name', 'last_name', 'staff_status', 'phone', 'birth_date', 'source', 'client_status_col')
+    list_filter = ('is_superuser', 'userprofile__how_heard', ClientStatusFilter)
+    search_fields = ('username', 'email', 'first_name', 'last_name', 'userprofile__phone')
+
+    # Field layout when editing a user
+    fieldsets = (
+        (None, {'fields': ('username', 'email', 'password', 'personal_discount_percent')}),
+        ('Personal Info', {'fields': (
+            'first_name', 'last_name', 'phone', 'birth_date', 'address',
+            'postal_code', 'how_heard', 'email_marketing_consent'
+        )}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        ('Files', {'fields': ('files',)}),
+        ('Notes', {'fields': ('notes',)}),
+        ('Health', {
+            'classes': ('collapse', 'wide'),
+            'fields': (
+                'has_allergies', 'allergies_text', 'gender',
+                'chronic_conditions', 'medications',
+                'pregnant', 'skin_sensitivity',
+                'recent_procedures', 'contraindications',
+                'health_notes',
+            ),
+        }),
+    )
+
+    def get_queryset(self, request):
+        # чтобы не ловить N+1
+        return super().get_queryset(request).select_related('userprofile')
+
+    @admin.display(description="Status")
+    def client_status_col(self, obj):
+        up = getattr(obj, 'userprofile', None)
+        return getattr(up, 'client_status', '-') if up else ('-')
+
+    @admin.display(description="Source")
+    def source(self, obj):
+        up = getattr(obj, 'userprofile', None)
+        return getattr(up, 'source', '-') if up else '-'
+
+    def get_fieldsets(self, request, obj=None):
+        # Allow Django to use default fieldsets logic
+        return super().get_fieldsets(request, obj)
+
+    def get_form(self, request, obj=None, **kwargs):
+        # Return different form on add vs change
+        return self.add_form if obj is None else self.form
+
+    def save_model(self, request, obj, form, change):
+        # Save user and assign roles
+        super().save_model(request, obj, form, change)
+
+    # Custom display methods for user profile fields
+    def phone(self, instance):
+        return instance.userprofile.phone if hasattr(instance, 'userprofile') else '-'
+
+    def birth_date(self, instance):
+        return instance.userprofile.birth_date if hasattr(instance, 'userprofile') else '-'
+
+    def _maybe_redirect_back(self, request, response):
+        """
+        Если пришли из Appointment (по нашему параметру _from_appointment),
+        вернёмся на календарь визитов.
+        """
+        if "_from_appointment" in request.GET or "_from_appointment" in request.POST:
+
+            return redirect(reverse("admin:core_appointment_changelist"))
+        return response
+
+    def response_add(self, request, obj, post_url_continue=None):
+        resp = super().response_add(request, obj, post_url_continue)
+        return self._maybe_redirect_back(request, resp)
+
+    def response_change(self, request, obj):
+        resp = super().response_change(request, obj)
+        return self._maybe_redirect_back(request, resp)
+
+    def response_delete(self, request, obj_display, obj_id):
+        resp = super().response_delete(request, obj_display, obj_id)
+        return self._maybe_redirect_back(request, resp)
+
+    @admin.display(description="")
+    def send_notify_button(self, obj):
+        return mark_safe(
+            f'<button type="button" class="send-notify-btn" '
+            f'data-user-id="{obj.id}" '
+            f'data-user-name="{obj.get_full_name() or obj.username}">Send Notification</button>'
+        )
+    def get_urls(self):
+        urls = super().get_urls()
+        opts = self.model._meta
+        custom_urls = [
+            path(
+                'import-users/',
+                self.admin_site.admin_view(self.import_users_view),
+                name=f'{opts.app_label}_{opts.model_name}_import',
+            ),
+            path('send_notification/', self.admin_site.admin_view(self.send_notification_view), name='send_notification'),
+        ]
+        return custom_urls + urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        try:
+            opts = self.model._meta
+            extra_context.setdefault(
+                'import_url',
+                reverse(f'admin:{opts.app_label}_{opts.model_name}_import'),
+            )
+            extra_context.setdefault('import_label', 'Import users')
+        except NoReverseMatch:
+            pass
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def import_users_view(self, request):
+        opts = self.model._meta
+        form = UserImportUploadForm()
+        if request.method == "POST":
+            form = UserImportUploadForm(request.POST, request.FILES)
+            if form.is_valid():
+                uploaded = form.cleaned_data["import_file"]
+                try:
+                    result = import_users_from_file(uploaded)
+                except UserImportSchemaError as exc:
+                    form.add_error("import_file", str(exc))
+                except UserImportError as exc:
+                    form.add_error(None, str(exc))
+                else:
+                    if result.created:
+                        messages.success(request, f"Imported {result.created} user(s).")
+                    if result.errors:
+                        snippet = result.errors[:10]
+                        list_html = format_html_join(
+                            '',
+                            '<li>Row {0} ({1}): {2}</li>',
+                            (
+                                (
+                                    message.row_number,
+                                    message.username or '-',
+                                    message.message,
+                                )
+                                for message in snippet
+                            ),
+                        )
+                        remaining = len(result.errors) - len(snippet)
+                        tail = ""
+                        if remaining > 0:
+                            tail = format_html('<p>... and {} more row(s) with issues.</p>', remaining)
+                        messages.error(
+                            request,
+                            format_html('Some rows could not be imported:<ul>{}</ul>{}', list_html, tail),
+                        )
+
+                    changelist_url = reverse(f'admin:{opts.app_label}_{opts.model_name}_changelist')
+                    return redirect(changelist_url)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": opts,
+            "form": form,
+            "title": "Import users",
+        }
+        return TemplateResponse(request, "admin/user_import.html", context)
+
+    @method_decorator(csrf_exempt)
+    def send_notification_view(self, request):
+        if request.method == "POST":
+            data = json.loads(request.body)
+            user_id = data.get("user_id")
+            message = data.get("message")
+
+            user = UserProfile.objects.filter(id=user_id).first()
+            if user:
+                Notification.objects.create(
+                    user=user,
+                    message=message,
+                    channel="email"  # или sms
+                )
+                return JsonResponse({"status": "ok"})
+
+        return JsonResponse({"status": "error"}, status=400)
+    @admin.display(boolean=True, description="Staff Status")
+    def staff_status(self, instance):
+        return instance.is_staff
+    staff_status.boolean = True
+
+
+# Unregister the default User admin and re-register with our custom one
+admin.site.unregister(User)
+admin.site.register(User, CustomUserAdmin)
+
+
+@admin.register(MasterAvailability)
+class MasterAvailabilityAdmin(ExportCsvMixin, admin.ModelAdmin):
+    form = MasterAvailabilityForm
+    list_display = ("master", "start_time", "end_time", "reason")
+    list_filter = ("master",)
+    search_fields = ("master__first_name", "master__last_name", "reason")
+    export_fields = ["master", "start_time", "end_time", "reason"]
+
+    def _redirect_to_appointments(self, request):
+        url = reverse("admin:core_appointment_changelist")
+        # переносим дату (и любые будущие параметры из календаря)
+        passthrough = {}
+        for key in ("date",):
+            val = request.GET.get(key) or request.POST.get(key)
+            if val:
+                passthrough[key] = val
+        if passthrough:
+            url = f"{url}?{urlencode(passthrough)}"
+        return redirect(url)
+
+    # ---- после добавления ----
+    def response_add(self, request, obj, post_url_continue=None):
+        # всегда назад в календарь записей
+        return self._redirect_to_appointments(request)
+
+    # ---- после изменения ----
+    def response_change(self, request, obj):
+        # даже если нажали "Сохранить и продолжить" — уводим в календарь
+        return self._redirect_to_appointments(request)
+
+    # ---- после удаления ----
+    def response_delete(self, request, obj_display, obj_id):
+        return self._redirect_to_appointments(request)
+
+    def has_add_permission(self, request):
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        return hasattr(request.user, "master_profile")
+
+    def has_change_permission(self, request, obj=None):
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        if hasattr(request.user, "master_profile"):
+            # список — разрешаем открыть; конкретный объект — только свой
+            return True if obj is None else (obj.master_id == request.user.master_profile.id)
+        return False
+
+    # --- удаление: только свои (админ/стфф — любые)
+    def has_delete_permission(self, request, obj=None):
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        if hasattr(request.user, "master_profile"):
+            return True if obj is None else (obj.master_id == request.user.master_profile.id)
+        return False
+
+    # --- только свои time off ---
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return qs.filter(master=request.user.master_profile)
+        return qs
+    def get_form(self, request, obj=None, **kwargs):
+        BaseForm = super().get_form(request, obj, **kwargs)
+
+        class WrappedForm(BaseForm):
+            def __init__(self, *args, **kw):
+                super().__init__(*args, **kw)
+                # Только для мастеров (не суперюзеров/стффа)
+                if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+                    if "master" in self.fields:
+                        # визуально фиксируем поле
+                        self.fields["master"].disabled = True
+        return WrappedForm
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+
+        date_str = request.GET.get("date")
+        time_str = request.GET.get("time")
+        const_master = request.GET.get("master")
+
+        if date_str and time_str:
+            try:
+                combined = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                initial["start_time"] = make_aware(combined)
+
+            except ValueError:
+                pass
+        if const_master:
+            initial["master"] = const_master
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            initial["master"] = request.user.master_profile.id
+
+        return initial
+
+
+# -----------------------------
+# Appointment Admin
+# -----------------------------
+
+
+def _can_override_discount_rule(user) -> bool:
+    """Право на одновременную скидку услуги и промокод в одной позиции."""
+    return bool(
+        getattr(user, "is_superuser", False)
+        or user.has_perm("core.bypass_service_discount_rule")  # NOTE: при желании задай такой perm
+    )
+
+
+def _can_edit_unit_price(user) -> bool:
+    """Право редактировать индивидуальную цену позиции (unit_price)."""
+    return bool(
+        getattr(user, "is_superuser", False)
+        or user.has_perm("core.can_edit_unit_price")  # NOTE: при желании задай такой perm
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Inline: AppointmentItem
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AppointmentItemInline(admin.TabularInline):
+    model = AppointmentItem
+    form = AppointmentItemInlineForm
+    fk_name = "appointment"
+    extra = 0
+    # autocomplete_fields = ["service", "master", "promocode"]  # если используете автокомплит
+
+    def get_formset(self, request, obj=None, **kwargs):
+        """
+        obj — это родитель (Appointment). Передадим его в каждую форму через kwargs.
+        А ещё скорректируем queryset для промокода, чтобы уже выбранный (даже неактивный) отображался.
+        """
+        parent = obj
+        FormSet = super().get_formset(request, obj, **kwargs)
+
+        class PrefillFormSet(FormSet):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                # Если у вас в форме есть поле 'promocode' и вы фильтруете только активные,
+                # добиваемся, чтобы выбранный ранее промокод тоже был в queryset:
+                for form in self.forms:
+                    if hasattr(form, "fix_promocode_queryset"):
+                        form.fix_promocode_queryset()
+
+            def _construct_form(self, i, **kw):
+                # Передаём родителя в конструктор формы
+                kw.setdefault("parent_obj", parent)
+                return super()._construct_form(i, **kw)
+
+        return PrefillFormSet
+
+    def has_delete_permission(self, request, obj=None):
+
+        return True
+
+
+class AppointmentProductSaleInline(admin.StackedInline):
+    model = ProductSale
+    form = AppointmentProductSaleForm
+    fk_name = "appointment"
+    extra = 0
+    autocomplete_fields = ("product", "sold_by", "client")
+    verbose_name = "Product sale"
+    verbose_name_plural = "Product sales"
+    prefix = "product_sales"
+
+    def formfield_for_foreignkey(self, db_field, request=None, **kwargs):
+        if db_field.name == "client":
+            kwargs["queryset"] = (
+                UserProfile.objects.filter(userrole__role__name="Client")
+                .select_related("user")
+                .order_by("user__first_name", "user__last_name", "user__username")
+                .distinct()
+            )
+        if db_field.name == "sold_by" and request is not None:
+            profile = getattr(request.user, "userprofile", None)
+            filters = Q(user__is_superuser=True)
+            if profile:
+                filters |= Q(pk=profile.pk)
+            kwargs["queryset"] = (
+                UserProfile.objects.select_related("user")
+                .filter(filters)
+                .order_by("user__first_name", "user__last_name", "user__username")
+            )
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        base_kwargs = getattr(formset, "form_kwargs", {}) or {}
+        formset.form_kwargs = {**base_kwargs, "request": request, "appointment": obj}
+
+        price_url = reverse("admin:core_productsale_product_price")
+        product_field = formset.form.base_fields.get("product")
+        if product_field:
+            product_field.widget.attrs["data-price-endpoint"] = price_url
+        return formset
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CSV helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _money(x):
+    return f"{x:.2f}" if x is not None else ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AppointmentAdmin
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@admin.register(Appointment)
+class AppointmentAdmin(ExportXlsxMixin, admin.ModelAdmin):
+    """
+    Полнофункциональная админка:
+      • обычный список + календарный вид (?view=calendar)
+      • AJAX JSON эндпоинт для событий календаря
+      • CSV-экшены (по приёмам и по позициям)
+      • inline позиций с валидаторами/правами
+      • режим мастера: видит только свои записи, read-only, без действий
+    """
+    form = AppointmentAdminForm
+    inlines = [AppointmentItemInline, AppointmentProductSaleInline]
+    add_form = AppointmentAddForm
+    # NOTE: если хочешь отдельный шаблон для календаря — задай его здесь
+    change_list_template = "admin/appointments_calendar.html"  # твой базовый шаблон списка
+    change_form_template = "admin/custom_edit_appointment.html"
+    date_hierarchy = "start_time"  # поправь, если поле называется иначе
+
+    list_select_related = ("client",)
+    search_fields = (
+        "id",
+        "client__user__first_name",
+        "client__user__last_name",
+        "client__user__username",
+    )
+
+    ordering = ("-start_time",)
+    autocomplete=["promocode",]
+    readonly_fields = ("final_price", "discount_source", "personal_discount_percent", "computed_total_readonly", "items_preview",)
+
+    fieldsets = (
+        (None, {
+            "fields": (
+                "client",
+                "start_time",
+                "end_time",           # если есть
+                "status",             # если есть
+                "payment_status",     # если есть
+                "personal_discount",  # если есть
+                "computed_total_readonly",
+                "items_preview",
+            )
+        }),
+    )
+
+    # ── РЕЖИМ МАСТЕРА: права и доступ ────────────────────────────────────────
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        # if is_master(request.user):
+        #     # Если мастер хранится в AppointmentItem (мульти-услуги)
+        #     return qs.filter(items__master=master_obj(request.user)).distinct()
+            # Если мастер хранится прямо в Appointment (одиночная услуга):
+        # return qs.filter(master=master_obj(request.user))
+        return qs
+
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        if is_master(request.user):
+            # мастерам скрываем CSV-экшены и любые массовые действия
+            return {}
+        return actions
+
+    # ── QS и агрегаты ────────────────────────────────────────────────────────
+
+
+    def get_changeform_initial_data(self, request):
+        """
+        Для страницы создания (add) — дать начальные значения.
+        Для редактирования (change) Django сам подставит instance-данные.
+        """
+        from django.utils import timezone
+        data = super().get_changeform_initial_data(request)
+
+        # пример: округлим старт к ближайшим 15 минутам вперёд
+        now = timezone.now()
+        minute = (now.minute // 15 + 1) * 15
+        if minute == 60:
+            from datetime import timedelta
+            now = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        else:
+            now = now.replace(minute=minute, second=0, microsecond=0)
+        data.setdefault("start_time", now)
+
+        # если у пользователя есть привязанный мастер — подставим его в initial
+        # (мастер не сможет выбрать другого, это дополнительно контролируется на фронте и в POST)
+        mp = MasterProfile.objects.filter(user=UserProfile.objects.filter(user=request.user).first()).first()
+        if mp:
+            data.setdefault("master", mp)
+
+        return data
+
+    def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
+
+        ctx = dict(context)
+        adminform = ctx.get("adminform")
+        if adminform:
+            ctx["form"] = adminform.form
+
+        # отдаём инлайн-формсет позиций в шаблон
+        # ── НАЙТИ inline formsets НАДЁЖНО ─────────────────
+        items_inline = None
+        sales_inline = None
+        for inline in ctx.get("inline_admin_formsets", []):
+            model = getattr(inline.opts, "model", None)
+            if model is AppointmentItem:
+                items_inline = inline
+            elif model is ProductSale:
+                sales_inline = inline
+
+        if items_inline is not None:
+            ctx["items_formset"] = items_inline.formset
+            ctx["items_inline"] = items_inline
+        if sales_inline is not None:
+            ctx["product_sales_formset"] = sales_inline.formset
+            ctx["product_sales_inline"] = sales_inline
+            ctx["product_sales_prefix"] = sales_inline.formset.prefix
+            ctx["product_sales_can_delete"] = sales_inline.formset.can_delete
+
+        sale_forms_to_render = []
+        if sales_inline is not None:
+            for form in sales_inline.formset.forms:
+                instance_exists = getattr(form.instance, "pk", None)
+                if form.is_bound:
+                    if form.errors or not form.empty_permitted or form.has_changed():
+                        sale_forms_to_render.append(form)
+                elif instance_exists:
+                    sale_forms_to_render.append(form)
+        ctx["product_sales_forms"] = sale_forms_to_render
+
+        sale_defaults = {"quantity": 1}
+        if obj and getattr(obj, "client", None):
+            client_obj = obj.client
+            client_user = getattr(client_obj, "user", None)
+            raw_client_label = (
+                getattr(client_user, "get_full_name", lambda: "")() or getattr(client_user, "username", "") or str(client_obj)
+            )
+            client_label = (str(raw_client_label) or "").strip() or str(client_obj)
+            sale_defaults["client"] = {
+                "id": str(obj.client_id),
+                "label": client_label,
+            }
+        profile = getattr(request.user, "userprofile", None)
+        if profile:
+            user = getattr(profile, "user", None)
+            raw_sold_by_label = (
+                getattr(user, "get_full_name", lambda: "")() or getattr(user, "username", "") or str(profile)
+            )
+            sold_by_label = (str(raw_sold_by_label) or "").strip() or str(profile)
+            sale_defaults["sold_by"] = {
+                "id": str(profile.pk),
+                "label": sold_by_label,
+            }
+        ctx["product_sale_defaults"] = sale_defaults
+        ctx["product_sale_price_endpoint"] = reverse("admin:core_productsale_product_price")
+        # ===== данные для кастомных селектов =====
+        # ограничим пул мастеров, если текущий пользователь — мастер
+        mp = MasterProfile.objects.filter(user=UserProfile.objects.filter(user=request.user).first()).first()
+
+        # мастера (id, название)
+        # if is_master(request.user):
+        #     masters_qs = MasterProfile.objects.select_related("user").filter(pk=mp.pk)
+        # else:
+        masters_qs = MasterProfile.objects.select_related("user").all()
+
+        masters_qs = masters_qs.order_by("user__user__first_name", "user__user__last_name")
+        masters = [{"id": str(m.id), "name": str(m)} for m in masters_qs]
+
+        today = timezone.now().date()
+        svc_discounts = {}
+        for sd in ServiceDiscount.objects.filter(start_date__lte=today, end_date__gte=today).select_related("service"):
+            svc_discounts[str(sd.service_id)] = int(sd.discount_percent)
+
+        # карта мастер → [услуги]
+        ms_map = defaultdict(list)
+        for sm in ServiceMaster.objects.select_related("service", "master").order_by("service__name"):
+            sid = str(sm.service_id)
+            ms_map[str(sm.master_id)].append({
+                "id": str(sm.service_id),
+                "name": sm.service.name,
+                "base_price": str(sm.service.base_price),
+                "svc_disc": svc_discounts.get(sid, 0),  # %
+            })
+
+        # промокоды
+        promos_by_service = defaultdict(list)
+        promos_global = []
+        qs = PromoCode.objects.filter(active=True, start_date__lte=today, end_date__gte=today).prefetch_related("applicable_services")
+        for pc in qs:
+            payload = {"id": str(pc.pk), "text": pc.code, "discount": int(pc.discount_percent)}
+            services = list(pc.applicable_services.all())
+            if services:
+                for s in services:
+                    promos_by_service[str(s.pk)].append(payload)
+            else:
+                promos_global.append(payload)
+
+        intake_forms_overview: List[Dict[str, Any]] = []
+        intake_required_ids: List[str] = []
+        if obj:
+            submissions_map = {
+                str(sub.form_id): sub
+                for sub in ClientIntakeFormSubmission.objects.filter(appointment=obj).select_related("form")
+            }
+            required_forms_qs = (
+                ClientIntakeForm.objects
+                .filter(services__appointmentitem__appointment=obj)
+                .distinct()
+            )
+            for intake_form in required_forms_qs:
+                fid = str(intake_form.pk)
+                intake_required_ids.append(fid)
+                submission = submissions_map.get(fid)
+                service_names = list(
+                    intake_form.services
+                    .filter(appointmentitem__appointment=obj)
+                    .order_by("name")
+                    .values_list("name", flat=True)
+                    .distinct()
+                )
+                intake_forms_overview.append({
+                    "id": fid,
+                    "name": intake_form.name,
+                    "description": intake_form.description,
+                    "services": service_names,
+                    "submitted": bool(submission),
+                    "submitted_at": submission.submitted_at if submission else None,
+                    "manage_url": reverse("admin:core_appointment_manage_form", args=[obj.pk, intake_form.pk]),
+                })
+
+        ctx.update({
+            "masters_data": masters,
+            "ms_map_data": dict(ms_map),
+            "svc_discounts_data": svc_discounts,
+            "promos_by_service_data": dict(promos_by_service),
+            "promos_global_data": promos_global,
+            "APPT_FIELDS_1": ("client", "start_time", "payment_status", "current_status"),
+            "intake_forms_overview": intake_forms_overview,
+            "intake_required_ids": intake_required_ids,
+
+            # === важные флаги для шаблонов/JS ===
+            "is_master": is_master(request.user),
+            "current_master_id": mp.id if mp else None,
+        })
+        return super().render_change_form(request, ctx, add=add, change=change, form_url=form_url, obj=obj)
+
+    def manage_intake_form_view(self, request, appointment_id, form_id):
+        appointment = get_object_or_404(Appointment, pk=appointment_id)
+        if not self.has_change_permission(request, appointment):
+            raise PermissionDenied
+
+        intake_form = get_object_or_404(ClientIntakeForm, pk=form_id)
+        submission = (
+            ClientIntakeFormSubmission.objects
+            .filter(appointment=appointment, form=intake_form)
+            .first()
+        )
+
+        client_profile = getattr(appointment, "client", None)
+        if submission:
+            initial_data = submission.data or submission.raw_payload or {}
+        else:
+            initial_data = {}
+
+        if request.method == "POST":
+            bound_form = intake_form.build_bound_form(
+                data=request.POST,
+                files=request.FILES,
+                client=client_profile,
+            )
+            if bound_form.is_valid():
+                cleaned = _coerce_json(bound_form.cleaned_data)
+                ClientIntakeFormSubmission.objects.update_or_create(
+                    appointment=appointment,
+                    client=client_profile,
+                    form=intake_form,
+                    defaults={
+                        "submitted_by": request.user if getattr(request.user, "is_authenticated", False) else None,
+                        "data": cleaned,
+                        "raw_payload": cleaned,
+                        "form_schema_snapshot": intake_form.normalized_schema(),
+                        "schema_version": intake_form.schema_version,
+                        "is_complete": True,
+                    },
+                )
+                messages.success(request, f"{intake_form.name} saved.")
+                return redirect("admin:core_appointment_change", appointment.pk)
+        else:
+            bound_form = intake_form.build_bound_form(
+                data=None,
+                files=None,
+                initial=initial_data,
+                client=client_profile,
+            )
+
+        related_services = (
+            intake_form.services.filter(appointmentitem__appointment=appointment)
+            .order_by("name")
+            .values_list("name", flat=True)
+            .distinct()
+        )
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"{intake_form.name} — {appointment}",
+            "appointment": appointment,
+            "intake_form": intake_form,
+            "submission": submission,
+            "form": bound_form,
+            "related_services": list(related_services),
+            "back_url": reverse("admin:core_appointment_change", args=[appointment.pk]),
+        }
+        return TemplateResponse(request, "admin/appointment_manage_form.html", context)
+
+    def save_model(self, request, obj, form, change):
+        # Админка валидирует формы, но мы дополнительно страхуемся:
+        obj.full_clean()  # вызывает Appointment.clean()
+        super().save_model(request, obj, form, change)
+        new_status = form.cleaned_data.get("current_status")
+        if not new_status:
+            return
+
+        last = (AppointmentStatusHistory.objects
+                .filter(appointment=obj)
+                .order_by("-set_at")             # или -created_at
+                .values_list("status_id", flat=True)
+                .first())
+        if last != new_status.id:
+            AppointmentStatusHistory.objects.create(
+                appointment=obj,
+                status=new_status,
+                set_by=self._actor(request.user),
+                set_at=timezone.now(),
+            )
+
+    def _actor(self, user):
+        # Подгони под свой профиль:
+
+        p = getattr(user, "userprofile", None)
+        if p is not None:
+            return p
+        return user
+
+    def save_formset(self, request, form, formset, change):
+        # Забираем инстансы без сохранения
+        instances = formset.save(commit=False)
+        # Удаления — отдельно
+        for deleted in formset.deleted_objects:
+            deleted.delete()
+
+        # Прогоняем full_clean() на каждом дочернем объекте
+        for inst in instances:
+            if isinstance(inst, ProductSale):
+                if form.instance and not inst.client_id and getattr(form.instance, "client_id", None):
+                    inst.client_id = form.instance.client_id
+                if not inst.sold_by_id:
+                    profile = getattr(request.user, "userprofile", None)
+                    if profile:
+                        inst.sold_by = profile
+                if not inst.sold_at:
+                    base_dt = getattr(form.instance, "start_time", None)
+                    inst.sold_at = base_dt or timezone.now()
+            inst.full_clean()  # вызывает AppointmentItem.clean()
+            inst.save()
+
+        formset.save_m2m()
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is None:
+            kwargs["form"] = self.add_form
+        else:
+            kwargs["form"] = self.form
+        return super().get_form(request, obj, **kwargs)
+
+
+    def add_view(self, request, form_url='', extra_context=None):
+        return self.custom_create_view(request)
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            # только клиент при создании
+            return (("Client", {"fields": ("client",)}),)
+        # на редактировании — ваша стандартная форма
+        return (
+            (None, {"fields": ("client", "start_time", "payment_status")}),
+            ("Totals", {"fields": ("final_price", "discount_source", "personal_discount_percent"),
+                        "classes": ("collapse",)}),
+        )
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<uuid:appointment_id>/forms/<uuid:form_id>/",
+                self.admin_site.admin_view(self.manage_intake_form_view),
+                name="core_appointment_manage_form",
+            ),
+            path(
+                "create/custom/",
+                self.admin_site.admin_view(self.custom_create_view),
+                name="core_appointment_custom_create",
+            ),
+
+        ]
+        return custom + urls
+
+
+    def _default_payment_status_id(self):
+        obj, _ = PaymentStatus.objects.get_or_create(name="Not Paid")
+        return obj.id
+
+    def _context_lists(self):
+        clients = (
+            UserProfile.objects.select_related("user")
+            .annotate(label=Concat("user__first_name", Value(" "), "user__last_name"))
+            .values("id", "label")
+            .order_by("label")
+        )
+        masters = (
+            MasterProfile.objects.select_related("user")
+            .annotate(label=Concat("user__user__first_name", Value(" "), "user__user__last_name"))
+            .values("id", "label")
+            .order_by("label")
+        )
+
+        service_forms_map: Dict[str, List[str]] = {}
+        intake_forms_map: Dict[str, ClientIntakeForm] = {}
+        services_info: Dict[str, Dict[str, Any]] = {}
+
+        services_qs = (
+            Service.objects
+            .select_related("category")
+            .prefetch_related(
+                Prefetch(
+                    "pre_appointment_forms",
+                    queryset=ClientIntakeForm.objects.filter(is_active=True),
+                )
+            )
+        )
+        for svc in services_qs:
+            sid = str(svc.pk)
+            active_forms = list(svc.active_forms())
+            form_ids = [str(form.pk) for form in active_forms]
+            service_forms_map[sid] = form_ids
+            services_info[sid] = {
+                "id": sid,
+                "name": svc.name,
+                "base_price": str(svc.base_price),
+                "duration_min": svc.duration_min,
+                "forms": form_ids,
+            }
+            for form in active_forms:
+                intake_forms_map[str(form.pk)] = form
+
+        services_by_master: Dict[str, List[Dict[str, Any]]] = {}
+        qs = (
+            ServiceMaster.objects
+            .select_related("service", "master")
+            .values(
+                "master_id",
+                "service__id",
+                "service__name",
+                "service__base_price",
+                "service__duration_min",
+            )
+        )
+        for r in qs:
+            sid = str(r["service__id"])
+            base = services_info.get(sid)
+            if not base:
+                forms = service_forms_map.get(sid, [])
+                base = {
+                    "id": sid,
+                    "name": r["service__name"],
+                    "base_price": str(r["service__base_price"]),
+                    "duration_min": r["service__duration_min"],
+                    "forms": forms,
+                }
+                services_info[sid] = base
+            payload = {
+                "id": base["id"],
+                "name": base["name"],
+                "base_price": base["base_price"],
+                "duration_min": base["duration_min"],
+                "forms": list(base.get("forms", [])),
+            }
+            services_by_master.setdefault(str(r["master_id"]), []).append(payload)
+
+        return (
+            list(clients),
+            list(masters),
+            services_by_master,
+            service_forms_map,
+            intake_forms_map,
+        )
+
+    def _parse_start_dt(date_str: str | None, time_str: str | None):
+        if not date_str or not time_str:
+            return None
+    # Популярные форматы
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                naive = datetime.strptime(f"{date_str} {time_str}", fmt)
+                return timezone.make_aware(naive, timezone.get_current_timezone())
+            except ValueError:
+                pass
+        # Fallback для ISO, если прилетит time с 'Z'
+        try:
+            t = time_str.replace("Z", "+00:00") if time_str.endswith("Z") else time_str
+            dt = datetime.fromisoformat(f"{date_str}T{t}")
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt, timezone.get_current_timezone())
+            return dt
+        except Exception:
+            return None
+
+
+    def custom_create_view(self, request):
+        # ---------------- helpers ----------------
+        def _parse_dt(date_str: str | None, time_str: str | None):
+            if not date_str or not time_str:
+                return None
+            # популярные форматы
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    naive = datetime.strptime(f"{date_str} {time_str}", fmt)
+                    return make_aware(naive, get_current_timezone())
+                except ValueError:
+                    pass
+            # ISO fallback (если time приходит c 'Z' и т.п.)
+            try:
+                t = time_str.replace("Z", "+00:00") if time_str.endswith("Z") else time_str
+                dt = datetime.fromisoformat(f"{date_str}T{t}")
+                if dt.tzinfo is None:
+                    dt = make_aware(dt, get_current_timezone())
+                return dt
+            except Exception:
+                return None
+
+        def _empty_error_bag():
+            return {
+                "__all__": [],                 # глобальные ошибки
+                "fields": defaultdict(list),   # ошибки по полям формы (вне айтемов)
+                "items": defaultdict(lambda: defaultdict(list)),  # ошибки по строкам айтемов
+                "intake": defaultdict(lambda: defaultdict(list)),  # ошибки по формам-анкетам
+            }
+
+        def _serialize_validation_error(exc, bag):
+            """
+            Преобразует ValidationError (в т.ч. с message_dict) в наш bag.
+            """
+            if hasattr(exc, "message_dict"):
+                for key, msgs in exc.message_dict.items():
+                    msgs = msgs if isinstance(msgs, (list, tuple)) else [msgs]
+                    if key.startswith("items-"):
+                        # варианты: items-2-start_time или items-2
+                        parts = key.split("-")
+                        try:
+                            idx = int(parts[1])
+                        except Exception:
+                            idx = None
+                        if idx is not None:
+                            if len(parts) >= 3:
+                                field = "-".join(parts[2:])
+                                bag["items"][idx][field].extend(msgs)
+                            else:
+                                bag["items"][idx]["__all__"].extend(msgs)
+                        else:
+                            bag["__all__"].extend(msgs)
+                    elif key in ("__all__", "non_field_errors"):
+                        bag["__all__"].extend(msgs)
+                    elif key.startswith("intake:"):
+                        parts = key.split(":")
+                        if len(parts) >= 2:
+                            fintake = parts[1]
+                            field_name = parts[2] if len(parts) >= 3 else "__all__"
+                            bag["intake"][fintake][field_name].extend(msgs)
+                        else:
+                            bag["__all__"].extend(msgs)
+                    else:
+                        bag["fields"][key].extend(msgs)
+            else:
+                msgs = exc.messages if hasattr(exc, "messages") else [str(exc)]
+                bag["__all__"].extend(msgs)
+
+        def _finalize_bag(bag):
+            bag["fields"] = dict(bag["fields"])
+            bag["items"] = {i: dict(fields) for i, fields in bag["items"].items()}
+            bag["intake"] = {form_id: dict(fields) for form_id, fields in bag["intake"].items()}
+            return bag
+
+        def _context_lists():
+            """Ваш существующий метод, оставляю как есть; если у вас уже есть — используйте его."""
+            return self._context_lists()
+
+        def _build_forms_catalog(forms_map):
+            catalog = {}
+            for fid, form in forms_map.items():
+                catalog[fid] = {
+                    "id": fid,
+                    "name": form.name,
+                    "slug": form.slug,
+                    "description": form.description or "",
+                    "version": form.schema_version,
+                    "schema": form.normalized_schema(),
+                    "updated_at": form.updated_at.isoformat() if form.updated_at else None,
+                }
+            return catalog
+
+        # ---------------- GET: первичная отрисовка ----------------
+        try:
+            availability_url = reverse("api-availability")
+        except NoReverseMatch:
+            availability_url = ""
+
+        mp = MasterProfile.objects.filter(user=UserProfile.objects.filter(user=request.user).first()).first()
+        if request.method == "GET" and request.GET.get("master") != 'undefined':
+            clients, masters, services_by_master, service_forms_map, intake_forms_map = _context_lists()
+            intake_forms_catalog = _build_forms_catalog(intake_forms_map)
+            posted_intake_payload = {"forms": []}
+
+            q_date   = request.GET.get("date")
+            q_time   = request.GET.get("time")
+            q_master = request.GET.get("master")
+
+            if is_master(request.user):
+                q_master = str(mp.pk)
+                masters = [m for m in masters if str(m["id"]) == str(mp.pk)]
+
+            initial_first_item = {}
+
+            if q_master and MasterProfile.objects.filter(pk=q_master).exists():
+                initial_first_item["master"] = str(q_master)
+
+            dt = _parse_dt(q_date, q_time)
+            if dt:
+                initial_first_item["start_time_date"] = dt.strftime("%Y-%m-%d")
+                initial_first_item["start_time_time"] = dt.strftime("%H:%M:%S" if dt.second else "%H:%M")
+
+            ctx = {
+                **self.admin_site.each_context(request),
+                "clients": clients,
+                "masters": masters,
+                "services_by_master": services_by_master,
+                "initial_first_item": initial_first_item,
+                "prefill_query": {"date": q_date, "time": q_time, "master": str(q_master) if q_master else None},
+                "service_forms_map": service_forms_map,
+                "intake_forms_catalog": intake_forms_catalog,
+                "posted_intake_payload": posted_intake_payload,
+                "intake_error_map": {},
+
+                "is_master": is_master(request.user),
+                "current_master_id": mp.id if mp else None,
+                "availability_url": availability_url,
+            }
+            return TemplateResponse(request, "admin/custom_create_appointment.html", ctx)
+
+
+        # ---------------- POST: создаём запись ----------------
+        clients, masters, services_by_master, service_forms_map, intake_forms_map = _context_lists()
+        intake_forms_catalog = _build_forms_catalog(intake_forms_map)
+
+        if is_master(request.user):
+            masters = [m for m in masters if str(m["id"]) == str(mp.pk)]
+        # соберём промокоды по сервисам (как у вас)
+        promos_by_service: dict[str, list[dict]] = {}
+        try:
+            fk_qs = PromoCode.objects.filter(~Q(service=None)).select_related("service")
+        except Exception:
+            fk_qs = PromoCode.objects.none()
+
+        for pc in fk_qs:
+            sid = str(pc.service_id)
+            promos_by_service.setdefault(sid, []).append({
+                "id": str(pc.pk),
+                "text": getattr(pc, "code", str(pc.pk)),
+                "discount": getattr(pc, "discount_percent", None),
+            })
+
+        try:
+            m2m_qs = PromoCode.objects.prefetch_related("applicable_services")
+        except Exception:
+            m2m_qs = PromoCode.objects.none()
+
+        for pc in m2m_qs:
+            services = getattr(pc, "applicable_services", None)
+            if not services:
+                continue
+            for svc in services.all():
+                sid = str(svc.pk)
+                promos_by_service.setdefault(sid, []).append({
+                    "id": str(pc.pk),
+                    "text": getattr(pc, "code", str(pc.pk)),
+                    "discount": getattr(pc, "discount_percent", None),
+                })
+
+        # dedup + sort
+        for sid, items in promos_by_service.items():
+            seen, uniq = set(), []
+            for it in items:
+                if it["id"] in seen:
+                    continue
+                seen.add(it["id"])
+                uniq.append(it)
+            promos_by_service[sid] = sorted(uniq, key=lambda x: (x["text"] or "").lower())
+
+        intake_payload_raw = (request.POST.get("intake_payload") or "").strip()
+
+        # state + первичная валидация
+        bag = _empty_error_bag()
+        intake_payload = {"forms": []}
+        submitted_intake_map: dict[str, dict] = {}
+        if intake_payload_raw:
+            try:
+                intake_payload = json.loads(intake_payload_raw) or {"forms": []}
+            except json.JSONDecodeError:
+                bag["__all__"].append("Unable to parse submitted intake forms.")
+                intake_payload = {"forms": []}
+        if isinstance(intake_payload, dict):
+            entries = intake_payload.get("forms", [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    fid = entry.get("id")
+                    if fid:
+                        submitted_intake_map[str(fid)] = entry
+        else:
+            bag["__all__"].append("Invalid intake forms payload structure.")
+            intake_payload = {"forms": []}
+        client_id = (request.POST.get("client") or "").strip()
+        try:
+            total_forms = int(request.POST.get("items-TOTAL_FORMS", 0))
+        except Exception:
+            total_forms = 0
+
+        posted_items = []  # чтобы вернуть в шаблон ровно то, что вводили
+        for i in range(total_forms):
+            pref = f"items-{i}-"
+            posted_items.append({
+                "master":      (request.POST.get(pref + "master") or "").strip(),
+                "service":     (request.POST.get(pref + "service") or "").strip(),
+                "start_time_0": (request.POST.get(pref + "start_time_0") or "").strip(),  # date
+                "start_time_1": (request.POST.get(pref + "start_time_1") or "").strip(),  # time
+                "unit_price":  (request.POST.get(pref + "unit_price") or "").strip(),
+                "promocode":   (request.POST.get(pref + "promocode") or "").strip(),
+            })
+
+        # обязательные поля верхнего уровня
+        if not client_id:
+            bag["fields"]["client"].append("Client is required.")
+        if total_forms < 1:
+            bag["__all__"].append("Add at least one service.")
+
+        # построчная валидация ещё до создания объектов
+        valid_rows = []
+        for idx, row in enumerate(posted_items):
+            # пропускаем пустые
+            if not any(row.values()):
+                continue
+
+            master_id  = row["master"]
+            service_id = row["service"]
+            date_str   = row["start_time_0"]
+            time_str   = row["start_time_1"]
+
+            if is_master(request.user):
+                if master_id and str(master_id) != str(mp.pk):
+                    # фиксируем в UI, но и ошибку подсветим, чтобы было наглядно, почему перезатираем
+                    bag["items"][idx]["master"].append("You can assign items only to yourself.")
+                master_id = str(mp.pk)
+
+            if not master_id:
+                bag["items"][idx]["master"].append("Select master.")
+            if not service_id:
+                bag["items"][idx]["service"].append("Select service.")
+            if not date_str:
+                bag["items"][idx]["start_time_0"].append("Select date.")
+            if not time_str:
+                bag["items"][idx]["start_time_1"].append("Select time.")
+
+            dt = _parse_dt(date_str, time_str)
+            if date_str and time_str and not dt:
+                bag["items"][idx]["start_time_1"].append("Invalid date/time.")
+
+            valid_rows.append({
+                "idx": idx,
+                "master_id": master_id or None,
+                "service_id": service_id or None,
+                "dt": dt,
+                "unit_price": (row["unit_price"] or None),
+                "promocode_id": (row["promocode"] or None),
+            })
+
+        required_form_ids: set[str] = set()
+        for row in valid_rows:
+            service_id = row.get("service_id")
+            if not service_id:
+                continue
+            required_form_ids.update(service_forms_map.get(str(service_id), []))
+
+        client_profile = None
+        if client_id:
+            client_profile = UserProfile.objects.filter(pk=client_id).select_related("user").first()
+
+        validated_intake: dict[str, dict] = {}
+        for form_id in required_form_ids:
+            form_obj = intake_forms_map.get(form_id)
+            if not form_obj:
+                continue
+            submission_entry = submitted_intake_map.get(form_id)
+            if not submission_entry:
+                bag["intake"][form_id]["__all__"].append("This form must be completed before booking.")
+                continue
+            payload = submission_entry.get("data") or {}
+            if not isinstance(payload, dict):
+                bag["intake"][form_id]["__all__"].append("Invalid payload for this form.")
+                continue
+            bound_form = form_obj.build_bound_form(data=payload, client=client_profile)
+            if not bound_form.is_valid():
+                for field_name, errors in bound_form.errors.items():
+                    target = field_name if field_name != "__all__" else "__all__"
+                    bag["intake"][form_id][target].extend([str(err) for err in errors])
+                continue
+            validated_intake[form_id] = {
+                "cleaned_data": bound_form.cleaned_data,
+                "raw_data": payload,
+                "form": form_obj,
+            }
+
+        # если уже есть ошибки — просто показать страницу с ними
+        has_errors = bool(bag["__all__"] or bag["fields"] or bag["items"] or bag["intake"])
+        if has_errors:
+            ctx = {
+                **self.admin_site.each_context(request),
+                "clients": clients,
+                "masters": masters,
+                "services_by_master": services_by_master,
+                "promos_by_service_json": json.dumps(promos_by_service),
+                "form_errors": bag["__all__"],
+                "field_errors": dict(bag["fields"]),
+                "item_errors": {i: dict(v) for i, v in bag["items"].items()},
+                "intake_error_map": {fid: dict(fields) for fid, fields in bag["intake"].items()},
+                "posted_items": posted_items,
+                "posted_client": client_id,
+                "service_forms_map": service_forms_map,
+                "intake_forms_catalog": intake_forms_catalog,
+                "posted_intake_payload": intake_payload,
+
+
+                "is_master": is_master(request.user),
+                "current_master_id": mp.id if mp else None,
+                "availability_url": availability_url,
+            }
+            return TemplateResponse(request, "admin/custom_create_appointment.html", ctx)
+
+        # всё валидно — создаём
+        try:
+            with transaction.atomic():
+                appt = Appointment(
+                    client_id=client_id,
+                    payment_status_id=self._default_payment_status_id(),
+                )
+                appt.full_clean()
+                appt.save()
+
+
+                row_errs = {}  # message_dict для последующего ValidationError
+                prebuilt_items = []  # сюда сложим валидные, чтобы потом сохранить
+
+
+
+                for row in valid_rows:
+                    idx = row["idx"]
+                    if not (row["master_id"] and row["service_id"] and row["dt"]):
+                        # (сюда попадём только если кто-то внезапно пустой — но мы отфильтровали выше)
+                        key = f"items-{idx}"
+                        row_errs.setdefault(key, []).append("Incomplete row.")
+                        continue
+
+                    if is_master(request.user) and str(row["master_id"]) != str(mp.pk):
+                        key = f"items-{idx}-master"
+                        row_errs.setdefault(key, []).append("You can assign items only to yourself.")
+                        continue
+                    item = AppointmentItem(
+                        appointment=appt,
+                        master_id=row["master_id"],
+                        service_id=row["service_id"],
+                        start_time=row["dt"],
+                        unit_price=row["unit_price"] or None,
+                    )
+                    try:
+                        item.full_clean()
+                        prebuilt_items.append((idx, item, row.get("promocode_id") or ""))
+                        item.save()
+                    except ValidationError as e:
+                        if hasattr(e, "message_dict"):
+                            for field, msgs in e.message_dict.items():
+                                msgs = msgs if isinstance(msgs, (list, tuple)) else [msgs]
+                                if field in ("__all__", "non_field_errors"):
+                                    key = f"items-{idx}"
+                                    row_errs.setdefault(key, []).extend(msgs)
+                                else:
+                                    key = f"items-{idx}-{field}"
+                                    row_errs.setdefault(key, []).extend(msgs)
+                        else:
+                            msgs = e.messages if hasattr(e, "messages") else [str(e)]
+                            key = f"items-{idx}"
+                            row_errs.setdefault(key, []).extend(msgs)
+
+                    # Если хотя бы у одной строки есть ошибки — откатываем и показываем их в форме
+                if row_errs:
+                    raise ValidationError(row_errs)
+                first_start = None
+                for idx, item, promocode_id in prebuilt_items:
+                    item.save()
+                    if first_start is None or item.start_time < first_start:
+                        first_start = item.start_time
+
+                    promo_id = (promocode_id or "").strip()
+                    if promo_id:
+                        promo_obj = PromoCode.objects.filter(pk=promo_id).first()
+                        if promo_obj:
+                            AppointmentItemPromoCode.objects.update_or_create(
+                                item=item, defaults={"promocode": promo_obj}
+                            )
+                    else:
+                        AppointmentItemPromoCode.objects.filter(item=item).delete()
+
+                if first_start:
+                    appt.start_time = first_start
+
+                if hasattr(appt, "recompute_totals"):
+                    appt.recompute_totals(save=True)
+                else:
+                    appt.save(update_fields=["start_time"])
+
+                status = AppointmentStatus.objects.filter(name="Booked").first()
+                if status:
+                    # аккуратно получаем профиль, если он есть
+                    set_by = getattr(getattr(request.user, "userprofile", None), "pk", None)
+                    AppointmentStatusHistory.objects.create(
+                        appointment=appt,
+                        status=status,
+                        set_by=request.user.userprofile if set_by else None,
+                    )
+
+                if validated_intake:
+                    profile_for_submission = getattr(appt, "client", None) or client_profile
+                    if profile_for_submission is None and client_id:
+                        profile_for_submission = UserProfile.objects.filter(pk=client_id).first()
+                    for payload in validated_intake.values():
+                        form_obj = payload["form"]
+                        if profile_for_submission is None:
+                            continue
+                        ClientIntakeFormSubmission.objects.create(
+                            form=form_obj,
+                            client=profile_for_submission,
+                            appointment=appt,
+                            submitted_by=request.user if getattr(request.user, "is_authenticated", False) else None,
+                            data=_coerce_json(payload["cleaned_data"]),
+                            raw_payload=_coerce_json(payload["raw_data"]),
+                            form_schema_snapshot=form_obj.normalized_schema(),
+                            schema_version=form_obj.schema_version,
+                            is_complete=True,
+                        )
+
+            messages.success(request, "Appointment created.")
+            return redirect("admin:core_appointment_change", appt.pk)
+
+        except ValidationError as ve:
+            # Переносим ошибки из моделей в наш мешок и показываем в той же форме
+            _serialize_validation_error(ve, bag)
+            bag = _finalize_bag(bag)
+            ctx = {
+                **self.admin_site.each_context(request),
+                "clients": clients,
+                "masters": masters,
+                "services_by_master": services_by_master,
+                "promos_by_service_json": json.dumps(promos_by_service),
+                "form_errors": bag["__all__"],
+                "field_errors": bag["fields"],
+                "item_errors": bag["items"],
+                "intake_error_map": bag["intake"],
+                "posted_items": posted_items,
+                "posted_client": client_id,
+                "service_forms_map": service_forms_map,
+                "intake_forms_catalog": intake_forms_catalog,
+                "posted_intake_payload": intake_payload,
+                "is_master": is_master(request.user),
+                "current_master_id": mp.id if mp else None,
+                "availability_url": availability_url,
+            }
+            return TemplateResponse(request, "admin/custom_create_appointment.html", ctx)
+
+        except IntegrityError as ie:
+            # Ошибка БД — показываем как глобальную и не падаем 500
+            bag["__all__"].append(f"Database error: {ie}")
+            ctx = {
+                **self.admin_site.each_context(request),
+                "clients": clients,
+                "masters": masters,
+                "services_by_master": services_by_master,
+                "promos_by_service_json": json.dumps(promos_by_service),
+                "form_errors": bag["__all__"],
+                "field_errors": dict(bag["fields"]),
+                "item_errors": {i: dict(v) for i, v in bag["items"].items()},
+                "intake_error_map": {fid: dict(fields) for fid, fields in bag["intake"].items()},
+                "posted_items": posted_items,
+                "posted_client": client_id,
+                "service_forms_map": service_forms_map,
+                "intake_forms_catalog": intake_forms_catalog,
+                "posted_intake_payload": intake_payload,
+                "is_master": is_master(request.user),
+                "current_master_id": mp.id if mp else None,
+                "availability_url": availability_url,
+            }
+            return TemplateResponse(request, "admin/custom_create_appointment.html", ctx)
+
+        except Exception:
+            # На проде — лог, а пользователю безопасно
+            bag["__all__"].append("Unexpected error while creating appointment.")
+            ctx = {
+                **self.admin_site.each_context(request),
+                "clients": clients,
+                "masters": masters,
+                "services_by_master": services_by_master,
+                "promos_by_service_json": json.dumps(promos_by_service),
+                "form_errors": bag["__all__"],
+                "field_errors": dict(bag["fields"]),
+                "item_errors": {i: dict(v) for i, v in bag["items"].items()},
+                "intake_error_map": {fid: dict(fields) for fid, fields in bag["intake"].items()},
+                "posted_items": posted_items,
+                "posted_client": client_id,
+                "service_forms_map": service_forms_map,
+                "intake_forms_catalog": intake_forms_catalog,
+                "posted_intake_payload": intake_payload,
+                "is_master": is_master(request.user),
+                "current_master_id": mp.id if mp else None,
+                "availability_url": availability_url,
+            }
+            return TemplateResponse(request, "admin/custom_create_appointment.html", ctx)
+
+    @admin.display(description=_("Позиций"), ordering="_items_count")
+    def items_count_display(self, obj):
+        return getattr(obj, "_items_count", 0)
+
+    @admin.display(description=_("Итого, $"), ordering="_total")
+    def total_price_display(self, obj):
+        return getattr(obj, "_total", Decimal("0"))
+
+    @admin.display(description=_("Статус"))
+    def status_display(self, obj):
+        return getattr(obj, "status", None) or "—"
+
+    @admin.display(description=_("Оплата"))
+    def payment_status_display(self, obj):
+        return getattr(obj, "payment_status", None) or "—"
+
+    @admin.display(description=_("Состав"))
+    def items_preview(self, obj):
+        items_mgr = getattr(obj, "appointmentitem_set", None) or getattr(obj, "items", None)
+        if not items_mgr:
+            return "—"
+        parts = []
+        for it in items_mgr.all()[:6]:
+            s_name = getattr(it.service, "name", str(it.service))
+            m_name = getattr(it.master, "short_name", None) or getattr(it.master, "user", None) or "—"
+            start = getattr(it, "start_time", None)
+            fp = getattr(it, "final_price", None)
+            frag = f"{s_name} | {m_name}"
+            if start:
+                frag += f" @ {start:%Y-%m-%d %H:%M}"
+            if fp is not None:
+                frag += f" — ${fp}"
+            parts.append(frag)
+        if items_mgr.count() > 6:
+            parts.append("…")
+        return " | ".join(parts)
+
+    @admin.display(description=_("Итого (расчёт)"), ordering="_total")
+    def computed_total_readonly(self, obj):
+        return self.total_price_display(obj)
+
+    # ── Сохранение и жёсткие проверки ────────────────────────────────────────
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        appt = form.instance
+        mp = MasterProfile.objects.filter(user=UserProfile.objects.filter(user=request.user).first()).first()
+        if is_master(request.user):
+            for formset in formsets:
+                if not isinstance(formset, BaseInlineFormSet):
+                    continue
+                model = getattr(getattr(formset, "model", None), "__name__", "")
+                # интересует только инлайн с AppointmentItem
+                if model != "AppointmentItem":
+                    continue
+
+        appt.recompute_totals(save=True)
+        # Бизнес-правила (как и раньше — строгость сохранили):
+        validate_appointment_has_items_on_save(appt)
+        validate_items_prices_nonnegative(appt)
+        # Если у тебя запрещены дубли услуг в одном приёме — оставь проверку:
+        # (иначе — закомментируй следующую строку)
+        # validate_no_duplicate_services_in_items(appt)
+        validate_no_time_overlap_for_same_master(appt)
+
+
+    # ── CSV действия (через твой миксин) ─────────────────────────────────────
+
+    actions = ["export_appointments_xlsx", "export_appointment_items_xlsx"]
+
+
+
+    # ── AJAX КАЛЕНДАРЬ (список → календарь + JSON) ──────────────────────────
+
+
+    def changelist_view(self, request, extra_context=None):
+        selected_date = request.GET.get('date')
+        if selected_date:
+            selected_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+        else:
+            selected_date = timezone.localdate()
+
+        services = Service.objects.all()
+        appointment_statuses = AppointmentStatus.objects.all()
+        payment_statuses = PaymentStatus.objects.all()
+
+        appointments = AppointmentItem.objects.select_related(
+            'appointment__client', 'service', 'master'
+        ).prefetch_related('appointment__items__service')
+
+        masters = MasterProfile.objects.filter(
+            id__in=appointments.values_list('master_id', flat=True)
+        ).distinct()
+
+        start_of_day = make_aware(datetime.combine(selected_date, datetime.min.time()))
+        end_of_day = make_aware(datetime.combine(selected_date, datetime.max.time()))
+
+        availabilities = MasterAvailability.objects.filter(
+            start_time__lte=end_of_day,
+            end_time__gte=start_of_day
+        )
+
+        if request.GET.get("service"):
+            appointments = appointments.filter(service_id=request.GET["service"])
+        if request.GET.get("status"):
+            appointments = appointments.filter(
+                appointment__appointmentstatushistory__status_id=request.GET["status"]
+            )
+        if request.GET.get("payment_status"):
+            appointments = appointments.filter(
+                appointment__payment_status_id__in=request.GET.getlist("payment_status")
+            )
+
+        # Слоты по 15 минут
+        start_hour = 8
+        end_hour = 21
+        slot_times = []
+        time_pointer = datetime(2000, 1, 1, start_hour, 0)
+        end_time = datetime(2000, 1, 1, end_hour, 0)
+
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            action = request.GET.get("action")
+            calendar_table = createTable(
+                selected_date, time_pointer, end_time, slot_times, appointments, masters, availabilities
+            )
+
+            if action == "filter":
+                html = render_to_string('admin/appointments_calendar_partial.html', {
+                    "calendar_table": calendar_table,
+                    'masters': masters,
+                })
+                return JsonResponse({"html": html})
+
+            elif action == "calendar":
+                html = render_to_string('admin/appointments_calendar_partial.html', {
+                    'calendar_table': calendar_table,
+                    'masters': masters,
+                }, request=request)
+                return JsonResponse({'html': html})
+
+        calendar_table = createTable(
+            selected_date, time_pointer, end_time, slot_times, appointments, masters, availabilities
+        )
+
+        response = super().changelist_view(request, extra_context=extra_context)
+
+        if hasattr(response, "context_data"):
+            context = response.context_data
+
+            # Собираем URL для XLSX-экспорта (с сохранением текущих фильтров)
+            try:
+                opts = self.model._meta
+                q = f"?{request.GET.urlencode()}" if request.GET else ""
+                export_url_xlsx = reverse(
+                    f'admin:{opts.app_label}_{opts.model_name}_export_xlsx'
+                ) + q
+            except NoReverseMatch:
+                export_url_xlsx = None
+
+            context.update({
+                "calendar_table": calendar_table,
+                "masters": masters,
+                "selected_date": selected_date,
+                "prev_date": (selected_date - timedelta(days=1)).strftime("%Y-%m-%d"),
+                "next_date": (selected_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "today": timezone.localdate().strftime("%Y-%m-%d"),
+                "services": services,
+                "appointment_statuses": appointment_statuses,
+                "payment_statuses": payment_statuses,
+                "export_url_xlsx": export_url_xlsx,  # <-- вот это добавили
+            })
+
+        return response
+
+
+# -----------------------------
+# Appointment Status History Admin
+# -----------------------------
+@admin.register(AppointmentStatusHistory)
+class AppointmentStatusHistoryAdmin(ExportCsvMixin,admin.ModelAdmin):
+    """
+    Admin interface for tracking status changes of appointments.
+    """
+    exclude = ('set_by',)
+    list_display = ('appointment', 'status', 'set_by', 'set_at')
+    list_filter = ('appointment','set_by')
+    export_fields = ['appointment', 'status', 'set_by', 'set_at']
+    def has_delete_permission(self, request, obj=None):
+        # Суперадмин может всегда
+        if request.user.is_superuser:
+            return True
+        # Мастер может удалять
+        if hasattr(request.user, "master_profile"):
+            return True
+        return False
+    def save_model(self, request, obj, form, change):
+        if not obj.set_by_id:
+            profile = getattr(request.user, "userprofile", None)
+            if profile is None:
+                profile, _ = UserProfile.objects.get_or_create(user=request.user)
+            obj.set_by = profile
+        super().save_model(request, obj, form, change)
+
+
+# -----------------------------
+# Payment Admin
+# -----------------------------
+@admin.register(Payment)
+class PaymentAdmin(ExportCsvMixin ,admin.ModelAdmin):
+    """
+    Admin interface for payments.
+    """
+    list_display = (
+        'appointment',
+        'amount',
+        'currency',
+        'status',
+        'amount_received',
+        'method',
+        'livemode',
+        'created_at',
+    )
+    list_filter = ('method', 'status', 'livemode')
+    search_fields = (
+        'appointment__client__user__first_name', 'appointment__client__user__last_name',
+        'appointment__client__user__email',
+        'appointment__master__user__first_name', 'appointment__master__user__last_name',
+        'appointment__service__name',
+        'stripe_payment_intent_id', 'stripe_charge_id',
+    )
+    readonly_fields = (
+        'created_at', 'updated_at', 'stripe_payment_intent_id', 'stripe_charge_id',
+        'stripe_payment_method_id', 'receipt_url', 'raw_response', 'metadata',
+        'amount_received', 'amount_refunded', 'captured_at', 'livemode',
+    )
+    export_fields = [
+        'appointment', 'amount', 'currency', 'status', 'amount_received',
+        'amount_refunded', 'method', 'livemode', 'stripe_payment_intent_id',
+        'stripe_charge_id', 'created_at',
+    ]
+
+
+# -----------------------------
+# Appointment Prepayment Admin
+# -----------------------------
+@admin.register(AppointmentPrepayment)
+class AppointmentPrepaymentAdmin(ExportCsvMixin,admin.ModelAdmin):
+    """
+    Admin interface for prepayment options tied to appointments.
+    """
+    list_display = ('appointment', 'option')
+    export_fields = ['appointment', 'option']
+
+# -----------------------------
+# Hidden Proxy Admin for CustomUserDisplay
+# -----------------------------
+@admin.register(CustomUserDisplay)
+class CustomUserDisplayAdmin(admin.ModelAdmin):
+    def _redirect_to_appointments(self, request):
+        url = reverse("admin:core_appointment_changelist")
+        # переносим дату (и любые будущие параметры из календаря)
+        passthrough = {}
+        for key in ("date",):
+            val = request.GET.get(key) or request.POST.get(key)
+            if val:
+                passthrough[key] = val
+        if passthrough:
+            url = f"{url}?{urlencode(passthrough)}"
+        return redirect(url)
+
+    # ---- после добавления ----
+    def response_add(self, request, obj, post_url_continue=None):
+        # всегда назад в календарь записей
+        return self._redirect_to_appointments(request)
+
+    # ---- после изменения ----
+    def response_change(self, request, obj):
+        # даже если нажали "Сохранить и продолжить" — уводим в календарь
+        return self._redirect_to_appointments(request)
+
+    # ---- после удаления ----
+    def response_delete(self, request, obj_display, obj_id):
+        return self._redirect_to_appointments(request)
+
+
+# -----------------------------
+# Service Master Admin
+# -----------------------------
+@admin.register(ServiceMaster)
+class ServiceMasterAdmin(ExportCsvMixin, admin.ModelAdmin):
+    """
+    Admin interface to assign masters to services.
+    """
+    list_display = ('master', 'service')
+    search_fields = ('master__user__first_name', 'master__user__last_name', 'service__name')
+    export_fields = ['master', 'service']
+
+# -----------------------------
+# Service Admin
+# -----------------------------
+@admin.register(Service)
+class ServiceAdmin(ExportCsvMixin, admin.ModelAdmin):
+    """
+    Admin interface for services.
+    """
+    list_display = ('name', 'base_price', 'category', 'duration_min', 'image_admin_thumb')
+    search_fields = ('name',)
+    list_filter = ('category',)
+    filter_horizontal = ("pre_appointment_forms",)
+    readonly_fields = ("image_preview",)
+    fieldsets = (
+        (None, {
+            "fields": (
+                "name",
+                "description",
+                "category",
+                "base_price",
+                "duration_min",
+                "extra_time_min",
+            )
+        }),
+        ("Media", {
+            "fields": (
+                "image",
+                "image_alt_text",
+                "image_preview",
+            )
+        }),
+        ("Pre-appointment forms", {
+            "fields": ("pre_appointment_forms",),
+        }),
+    )
+    export_fields = ['name', 'description','base_price', 'category', 'duration_min', 'extra_time_min']
+
+    @admin.display(description="Preview", ordering=False)
+    def image_admin_thumb(self, obj):
+        if obj.image:
+            return format_html('<img src="{}" style="height:48px;width:85px;object-fit:cover;border-radius:6px;" alt="{}"/>',
+                               obj.image.url,
+                               obj.card_image_alt)
+        return "—"
+
+    @admin.display(description="Current preview")
+    def image_preview(self, obj):
+        if obj.image:
+            return format_html('<img src="{}" style="max-width:320px;border-radius:10px;" alt="{}"/>',
+                               obj.image.url,
+                               obj.card_image_alt)
+        return "—"
+
+
+@admin.register(ClientIntakeForm)
+class ClientIntakeFormAdmin(admin.ModelAdmin):
+    form = ClientIntakeFormAdminForm
+    list_display = ("name", "slug", "is_active", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("name", "slug", "description")
+    prepopulated_fields = {"slug": ("name",)}
+    fieldsets = (
+        (None, {"fields": ("name", "slug", "description", "is_active")}),
+        (_("Builder"), {"fields": ("schema", "schema_version")} ),
+        (_("Form class"), {"fields": ("form_class",), "classes": ("collapse",)}),
+        (_("Timestamps"), {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ClientIntakeFormSubmission)
+class ClientIntakeFormSubmissionAdmin(admin.ModelAdmin):
+    list_display = ("form", "client", "appointment", "submitted_by", "submitted_at")
+    list_filter = ("form", "submitted_at", "submitted_by")
+    search_fields = (
+        "form__name",
+        "client__user__first_name",
+        "client__user__last_name",
+        "appointment__id",
+    )
+    readonly_fields = (
+        "form",
+        "client",
+        "appointment",
+        "submitted_by",
+        "submitted_at",
+        "data",
+        "raw_payload",
+        "form_schema_snapshot",
+        "schema_version",
+        "is_complete",
+    )
+# -----------------------------
+# Notification Admin
+# -----------------------------
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    """
+    Admin interface for notifications (email/SMS).
+    """
+    list_display = ('user', 'appointment', 'channel', 'short_message')
+    list_filter = (('sent_at', DateFieldListFilter), 'channel')
+    search_fields = ('user__user__first_name', 'user__user__last_name', 'appointment__service__name')
+    ordering = ['-sent_at']
+
+    @admin.display(description="message")
+    def short_message(self, obj):
+        """
+        Truncates long messages to first 10 words.
+        """
+        words = obj.message.split()
+        return ' '.join(words[:10]) + ('...' if len(words) > 10 else '')
+
+
+@admin.register(ReminderSchedule)
+class ReminderScheduleAdmin(admin.ModelAdmin):
+    list_display = ("name", "is_active", "offset_amount", "offset_unit", "email_template", "email_subject", "slug")
+    list_filter  = ("is_active", "offset_unit")
+    search_fields = ("name", "slug", "email_subject", "email_template")
+    fields = (
+        "name", "slug", "is_active",
+        "offset_amount", "offset_unit",
+        "email_subject", "email_template",
+    )
+
+# -----------------------------
+# Client File Admin
+# -----------------------------
+@admin.register(ClientFile)
+class ClientFileAdmin(admin.ModelAdmin):
+    """
+    Admin interface for managing user-uploaded files.
+    """
+    list_display = ('user', "uploaded_by" ,'file_type', 'file')
+    fields = ('user', 'file',"uploaded_by", 'file_type')
+    readonly_fields = ('file_type',)  # 👈 делаем только для чтения
+    exclude = ('file_type',)  # 👈 скрываем из формы создания
+    list_filter = (('uploaded_at', DateFieldListFilter), 'file_type')
+    search_fields = ('user__user__first_name', 'user__user__last_name')
+    ordering = ['-uploaded_at']
+
+
+
+# -----------------------------
+# Client Review Admin
+# -----------------------------
+@admin.register(ClientReview)
+class ClientReviewAdmin(ExportCsvMixin ,admin.ModelAdmin):
+    list_display = ("appointment", "get_client", "get_master", "rating", "created_at")
+    search_fields = ("appointment__client__user__first_name", "appointment__client__user__last_name", "comment")
+    list_filter = ("rating", "created_at")
+    export_fields = ["appointment", "get_client", "get_master", "rating", "created_at"]
+    @admin.display(description="Client")
+    def get_client(self, obj):
+        return obj.appointment.client.get_full_name()
+
+    @admin.display(description="Master")
+    def get_master(self, obj):
+        return obj.appointment.master.user.get_full_name()
+
+
+#-----------------------------
+# Discounts Admin
+#-----------------------------
+@admin.register(ServiceDiscount)
+class ServiceDiscountAdmin(ExportCsvMixin ,admin.ModelAdmin):
+    list_display = ('service', 'discount_percent', 'start_date', 'end_date', 'is_active')
+    list_filter = ('start_date', 'end_date', 'service')
+    search_fields = ('service__name',)
+    export_fields = ['service', 'discount_percent', 'start_date', 'end_date', 'is_active']
+    @admin.display(boolean=True)
+    def is_active(self, obj):
+        return obj.is_active()
+
+#-----------------------------
+# Promocode Admin
+#-----------------------------
+@admin.register(PromoCode)
+class PromoCodeAdmin(ExportCsvMixin ,admin.ModelAdmin):
+    list_display = ('code', 'discount_percent', 'start_date', 'end_date',)
+    list_filter = ('start_date', 'end_date')
+
+    export_fields = ['code', 'applicable_services', 'discount_percent', 'start_date', 'end_date']
+
+    @admin.display(boolean=True)
+    def is_active(self, obj):
+        return obj.is_active()
+
+
+# -----------------------------
+# Retail products & sales
+# -----------------------------
+
+
+class LowStockFilter(admin.SimpleListFilter):
+    title = "Low stock status"
+    parameter_name = "low_stock"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("1", "Needs restock"),
+            ("0", "Sufficient stock"),
+        )
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value == "1":
+            return queryset.filter(
+                low_stock_threshold__gt=0,
+                quantity_in_stock__lte=F("low_stock_threshold"),
+            )
+        if value == "0":
+            return queryset.exclude(
+                low_stock_threshold__gt=0,
+                quantity_in_stock__lte=F("low_stock_threshold"),
+            )
+        return queryset
+
+
+class ProductCategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "is_active", "created_at", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("name",)
+    ordering = ("name",)
+    readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        (None, {"fields": ("name", "description", "is_active")}),
+        ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
+
+
+class ProductAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "category",
+        "price",
+        "quantity_in_stock",
+        "low_stock_indicator",
+        "is_active",
+        "updated_at",
+    )
+    list_filter = ("is_active", "category", LowStockFilter)
+    search_fields = ("name", "sku")
+    ordering = ("name",)
+    readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        (None, {"fields": ("name", "sku", "category", "description", "is_active")}),
+        ("Pricing & Inventory", {"fields": ("price", "quantity_in_stock", "low_stock_threshold")}),
+        ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
+
+    @admin.display(description="Low stock", boolean=True)
+    def low_stock_indicator(self, obj):
+        return obj.is_low_on_stock
+
+
+class ProductSaleAdmin(admin.ModelAdmin):
+    form = ProductSaleAdminForm
+    date_hierarchy = "sold_at"
+    list_display = (
+        "sold_at",
+        "product",
+        "quantity",
+        "unit_price",
+        "total_amount",
+        "sold_by",
+        "client",
+        "appointment",
+    )
+    list_filter = (
+        "product__category",
+        "product",
+        "sold_by",
+        ("sold_at", DateFieldListFilter),
+    )
+    search_fields = (
+        "product__name",
+        "product__sku",
+        "appointment__id",
+        "client__user__first_name",
+        "client__user__last_name",
+        "client__user__username",
+        "notes",
+    )
+    ordering = ("-sold_at", "-id")
+    readonly_fields = ("total_amount", "created_at", "updated_at")
+    autocomplete_fields = ("product", "sold_by", "client", "appointment")
+    list_select_related = (
+        "product",
+        "sold_by__user",
+        "client__user",
+        "appointment__client__user",
+    )
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": (
+                    "product",
+                    "sold_by",
+                    "client",
+                    "appointment",
+                    "sold_at",
+                    "quantity",
+                    "unit_price",
+                    "total_amount",
+                    "notes",
+                )
+            },
+        ),
+        ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
+
+    def get_readonly_fields(self, request, obj=None):
+        readonly = list(super().get_readonly_fields(request, obj))
+        if obj:
+            readonly.extend(
+                [
+                    "product",
+                    "sold_by",
+                    "client",
+                    # allow updating appointment if needed post creation
+                    "sold_at",
+                    "quantity",
+                    "unit_price",
+                    "total_amount",
+                ]
+            )
+        return readonly
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "client":
+            kwargs["queryset"] = (
+                UserProfile.objects.filter(userrole__role__name="Client")
+                .select_related("user")
+                .order_by("user__first_name", "user__last_name", "user__username")
+                .distinct()
+            )
+        if db_field.name == "sold_by":
+            current_profile = getattr(request.user, "userprofile", None)
+            sold_by_filters = Q(user__is_superuser=True)
+            if current_profile:
+                sold_by_filters |= Q(pk=current_profile.pk)
+            kwargs["queryset"] = (
+                UserProfile.objects.select_related("user")
+                .filter(sold_by_filters)
+                .order_by(
+                    "user__first_name",
+                    "user__last_name",
+                    "user__username",
+                )
+            )
+        if db_field.name == "appointment":
+            kwargs["queryset"] = (
+                Appointment.objects.select_related("client__user")
+                .order_by("-start_time")
+            )
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        profile = getattr(request.user, "userprofile", None)
+        if not obj and profile and "sold_by" in form.base_fields:
+            form.base_fields["sold_by"].initial = profile.pk
+
+        product_field = form.base_fields.get("product")
+        if product_field:
+            product_field.widget.attrs["data-price-endpoint"] = reverse(
+                "admin:core_productsale_product_price"
+            )
+        return form
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "product-price/",
+                self.admin_site.admin_view(self.product_price_lookup),
+                name="core_productsale_product_price",
+            ),
+        ]
+        return custom + urls
+
+    def product_price_lookup(self, request: HttpRequest):
+        product_id = request.GET.get("product")
+        if not product_id:
+            return JsonResponse({"error": "Missing product id"}, status=400)
+        try:
+            product = Product.objects.only("price").get(pk=product_id)
+        except Product.DoesNotExist:
+            return JsonResponse({"error": "Product not found"}, status=404)
+        return JsonResponse({"unit_price": str(product.price)})
+
+    def save_model(self, request, obj, form, change):
+        if not obj.sold_by_id:
+            profile = getattr(request.user, "userprofile", None)
+            if profile:
+                obj.sold_by = profile
+        super().save_model(request, obj, form, change)
+
+
+# -----------------------------
+# Register remaining models directly
+# -----------------------------
+admin.site.register(ProductCategory, ProductCategoryAdmin)
+admin.site.register(Product, ProductAdmin)
+admin.site.register(ProductSale, ProductSaleAdmin)
+admin.site.register(Role)
+admin.site.register(UserRole)
+admin.site.register(AppointmentStatus)
+admin.site.register(PaymentMethod)
+admin.site.register(ClientSource)
+admin.site.register(MasterRoom)
+admin.site.register(ServiceCategory)
+admin.site.register(PrepaymentOption)
+admin.site.register(PaymentStatus)
+admin.site.register(CancellationReason)
+
+@admin.register(AppointmentItemPromoCode)
+class AppointmentItemPromoCodeAdmin(admin.ModelAdmin):
+    list_display = ["item", "promocode", "promocode__discount_percent", "promocode__start_date", "promocode__end_date"]
+
+
+
+@admin.register(UserProfile)
+class UserProfileAdmin(admin.ModelAdmin):
+    form = UserProfileChangeForm
+    search_fields = (
+        "user__first_name",
+        "user__last_name",
+        "user__username",
+        "user__email",
+        "phone",
+    )
+    # Явно перечислим поля на форме
+    @admin.display(description="First name")
+    def user_first_name(self, obj):
+        return getattr(getattr(obj, "user", None), "first_name", "")
+
+    @admin.display(description="Last name")
+    def user_last_name(self, obj):
+        return getattr(getattr(obj, "user", None), "last_name", "")
+
+    @admin.display(description="Email")
+    def user_email(self, obj):
+        return getattr(getattr(obj, "user", None), "email", "")
+
+    fieldsets = (
+        (None, {
+            "fields": (
+                "user_first_name",
+                "user_last_name"
+            )
+        }),
+        ("Personal Info", {
+            "fields": (
+                "phone", "user_email","birth_date", "postal_code",
+                "how_heard",
+            )
+        }),
+        ("Notes", {"fields": ("notes",)}),
+
+        # ТЕ САМЫЕ ПОЛЯ — но они теперь ПРИСУТСТВУЮТ в форме (как виртуальные),
+        # поэтому Django их корректно отрендерит в админке UserProfile.
+        ("Health", {
+            "classes": ("collapse", "wide"),
+            "fields": (
+                "has_allergies", "allergies_text", "gender",
+                "chronic_conditions", "medications",
+                "pregnant", "skin_sensitivity",
+                "recent_procedures", "contraindications",
+                "health_notes",
+            ),
+        }),
+
+    )
+
+    readonly_fields = ("user_first_name", "user_last_name", "user_email")
+
+
+    @admin.display(description="Status")
+    def client_status_col(self, obj):
+        return obj.client_status
+
+    def response_change(self, request, obj):
+        if "_from_appointment" in request.GET:
+            return redirect("admin:core_appointment_changelist")
+        return super().response_change(request, obj)
+
+    def response_delete(self, request, obj_display, obj_id):
+        if "_from_appointment" in request.GET:
+            return redirect("admin:core_appointment_changelist")
+        return super().response_delete(request, obj_display, obj_id)
+
+    def response_post_save_change(self, request, obj):
+        if "_from_appointment" in request.GET:
+            return redirect("admin:core_appointment_changelist")
+        return super().response_post_save_change(request, obj)
+
+    def get_readonly_fields(self, request, obj=None):
+        # Для мастера — все поля read-only, кроме 'notes'
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            # Берём список всех полей формы и исключаем 'notes'
+            all_fields = list(self.fields) if self.fields else [f.name for f in self.model._meta.fields]
+            return [f for f in all_fields if f != "notes"]
+        return super().get_readonly_fields(request, obj)
+
+
+    # Мастер может открывать и менять (только notes)
+    def has_change_permission(self, request, obj=None):
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return True
+        return super().has_change_permission(request, obj)
+
+    # Мастеру — нельзя создавать профили
+    def has_add_permission(self, request):
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return False
+        return super().has_add_permission(request)
+
+    # Мастеру — нельзя удалять профили
+    def has_delete_permission(self, request, obj=None):
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return False
+        return super().has_delete_permission(request, obj)
+
+class MasterWorkDayInline(admin.TabularInline):
+    model = MasterWorkDay
+    extra = 7  # сразу 7 строк для всех дней
+
+
+@admin.register(MasterProfile)
+class MasterProfileAdmin(ExportCsvMixin,admin.ModelAdmin):
+    inlines = [MasterWorkDayInline]
+    add_form = MasterCreateFullForm
+    change_list_template = "admin/master/changelist_cards.html"
+    list_per_page = 24
+
+    readonly_fields = ['password_display']
+    export_fields = ["first_name","last_name","email","username" ,"phone","birth_date","postal_code", "profession", 'bio', "room", "is_staff", "is_superuser", 'is_active']
+    search_fields = ("user__user__username", "user__user__first_name", "user__user__last_name")
+    def get_export_row(self, obj):
+        phone = obj.user.userprofile.phone if hasattr(obj, 'user') else ''
+        birth_date = obj.user.userprofile.birth_date if hasattr(obj, 'user') else ''
+        postal_code = obj.user.userprofile.postal_code if hasattr(obj, 'user') else ''
+
+
+        return [
+            obj.user.first_name,
+            obj.user.last_name,
+            obj.user.email,
+            obj.user.username,
+            phone,
+            birth_date,
+            postal_code,
+            obj.profession,
+            obj.bio,
+            obj.work_start,
+            obj.work_end,
+            obj.room,
+            obj.user.is_staff,
+            obj.user.is_superuser,
+            obj.user.is_active,
+        ]
+    form = MasterCreateFullForm  # на редактирование тоже можно оставить ту же
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.select_related("user__user", "room")
+
+    list_display = ("get_name", "room", "profession")
+
+    def get_fieldsets(self, request, obj=None):
+        form = self.form(instance=obj if obj else None)
+        fields = list(form.fields.keys())
+
+        if obj:
+            # редактирование
+            fields = [f for f in fields if f not in ['password1', 'password2', 'password']]  # ← обязательно убрать 'password'
+            if 'email' in fields and 'password_display' not in fields:
+                fields.insert(fields.index('email') + 1, 'password_display')
+            elif 'password_display' not in fields:
+                fields.append('password_display')
+        else:
+            # создание
+            fields = [f for f in fields if f != 'password_display']
+
+        return [(None, {'fields': fields})]
+
+    def password_display(self, obj):
+        from django.utils.html import format_html
+        reset_url = f"/admin/auth/user/{obj.user.id}/password/"
+        return format_html(
+            '<div style="word-break: break-all;">'
+            '<strong>algorithm:</strong> pbkdf2_sha256<br>'
+            '<strong>hash:</strong> {}<br><br>'
+            '<a href="{}" class="button" style="color: #fff; background: #007bff; padding: 4px 8px; text-decoration: none; border-radius: 4px;">Reset password</a>'
+            '</div>',
+            obj.user.password,
+            reset_url
+        )
+    password_display.short_description = "Password"
+
+    def has_change_permission(self, request, obj=None):
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if hasattr(request.user, "master_profile") and not request.user.is_superuser:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def get_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+
+        # 1. Забираем все текущие разрешения
+        user = obj.user.user
+        user.user_permissions.clear()
+
+        # 2. Добавляем только view_appointment
+        needed = [
+            # Appointment
+            "view_appointment", "add_appointment", "change_appointment", "delete_appointment",
+            # MasterAvailability (time off)
+            "view_masteravailability", "add_masteravailability", "change_masteravailability", "delete_masteravailability",
+
+             "view_userprofile", "change_userprofile", "add_appointmentitem", "change_appointmentitem", "delete_appointmentitem"
+        ]
+        perms = Permission.objects.filter(codename__in=needed)
+        user.user_permissions.add(*perms)
+
+        ct_proxy = ContentType.objects.get_for_model(CustomUserDisplay)
+        try:
+            p_view_proxy = Permission.objects.get(content_type=ct_proxy, codename="view_customuserdisplay")
+            user.user_permissions.add(p_view_proxy)
+        except Permission.DoesNotExist:
+            pass  # миграции ещё не применены — не падаем
+
+        # (не обязательно, но можно) право на просмотр профилей клиентов
+        ct_profile = ContentType.objects.get_for_model(UserProfile)
+        try:
+            p_view_profile = Permission.objects.get(content_type=ct_profile, codename="view_userprofile")
+            user.user_permissions.add(p_view_profile)
+        except Permission.DoesNotExist:
+            pass
+
+        user.save()
+
+
+TZ = get_current_timezone()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _parse_period(request: HttpRequest) -> tuple[date, date]:
+    """?start=YYYY-MM-DD&end=YYYY-MM-DD, по умолчанию последние 30 дней (включительно)."""
+    today = date.today()
+    start_s = request.GET.get("start") or ""
+    end_s = request.GET.get("end") or ""
+    try:
+        start = date.fromisoformat(start_s) if start_s else today - timedelta(days=30)
+    except Exception:
+        start = today - timedelta(days=30)
+    try:
+        end = date.fromisoformat(end_s) if end_s else today
+    except Exception:
+        end = today
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _cancel_no_show_names() -> list[str]:
+    """Фактические названия статусов в БД (fallback на строковые)."""
+    cancelled = (AppointmentStatus.objects
+                 .filter(name__iexact="Cancelled")
+                 .values_list("name", flat=True).first()) or "Cancelled"
+    no_show = (AppointmentStatus.objects
+               .filter(name__iexact="No_Show")
+               .values_list("name", flat=True).first()) or "No_Show"
+    return [cancelled, no_show]
+
+def _client_source_aggregation(qs):
+    # пробуем client__source, если его нет — client__how_heard
+    try:
+        rows = (
+            qs.values("client__source")
+            .annotate(
+                revenue=Coalesce(Sum("final_price"), Value(Decimal("0"))),
+                appts=Count("id"),
+                clients=Count("client_id", distinct=True),
+            )
+            .order_by("-revenue")
+        )
+        # нормализуем ключ + подпись
+        return [{"label": (r["client__source"] or "unknown"), **{k: r[k] for k in ("revenue","appts","clients")}} for r in rows]
+    except FieldError:
+        rows = (
+            qs.values("client__how_heard")
+            .annotate(
+                revenue=Coalesce(Sum("final_price"), Value(Decimal("0"))),
+                appts=Count("id"),
+                clients=Count("client_id", distinct=True),
+            )
+            .order_by("-revenue")
+        )
+        return [{"label": (r["client__how_heard"] or "unknown"), **{k: r[k] for k in ("revenue","appts","clients")}} for r in rows]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# view
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@staff_member_required
+def stats_view(request: HttpRequest) -> HttpResponse:
+    # ── Период
+    start, end = _parse_period(request)  # helper уже есть в файле
+
+    # ── Отбрасываем отменённые/похожие статусы
+    last_status_name = (
+        AppointmentStatusHistory.objects
+        .filter(appointment_id=OuterRef("pk"))
+        .order_by("-set_at")
+        .values("status__name")[:1]
+    )
+    cancelled_like = _cancel_no_show_names()  # helper уже есть
+
+    # Валидные аппы по дате начала визита (для счётчиков штук)
+    base_appt_q = (
+        Appointment.objects
+        .select_related("client__user")
+        .annotate(last_status=Subquery(last_status_name))
+        .exclude(last_status__in=cancelled_like)
+        .filter(start_time__date__gte=start, start_time__date__lte=end)
+    )
+
+    # Реальные платежи в периоде (по дате платежа)
+    payments_q = (
+        Payment.objects
+        .filter(
+            appointment__in=base_appt_q,
+            created_at__date__gte=start,
+            created_at__date__lte=end,
+        )
+    )
+
+    # ── KPI
+    kpi_total_revenue = payments_q.aggregate(
+        x=Coalesce(Sum("amount"), Value(Decimal("0.00")))
+    )["x"]
+    kpi_total_appointments = base_appt_q.count()
+    kpi_with_discount = base_appt_q.exclude(discount_source="").count()
+
+    # ── Топы (spent — по платежам периода)
+    pay_sub = (
+        payments_q
+        .filter(appointment__client_id=OuterRef("client_id"))
+        .values("appointment__client_id")
+        .annotate(s=Coalesce(Sum("amount"), Value(Decimal("0.00"))))
+        .values("s")[:1]
+    )
+
+    top_bookers = (
+        base_appt_q.values(
+            "client_id",
+            "client__user__first_name",
+            "client__user__last_name",
+            "client__user__email",
+        )
+        .annotate(
+            appt_count=Count("id"),
+            spent=Coalesce(Subquery(pay_sub), Value(Decimal("0.00"))),
+        )
+        .order_by("-appt_count", "-spent")[:10]
+    )
+
+    top_spenders = (
+        base_appt_q.values(
+            "client_id",
+            "client__user__first_name",
+            "client__user__last_name",
+            "client__user__email",
+        )
+        .annotate(
+            spent=Coalesce(Subquery(pay_sub), Value(Decimal("0.00"))),
+            appt_count=Count("id"),
+        )
+        .order_by("-spent", "-appt_count")[:10]
+    )
+
+    # ── Разбивка по discount_source (по платежам)
+    ds_totals = (
+        payments_q
+        .values(discount_source=F("appointment__discount_source"))
+        .annotate(
+            cnt=Count("appointment", distinct=True),
+            revenue=Coalesce(Sum("amount"), Value(Decimal("0.00"))),
+        )
+        .order_by("-revenue")
+    )
+
+    # ── Дневные суммы по источникам (stacked bar) — по платежам
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    daily = {d.isoformat(): {"general": 0.0, "personal": 0.0, "promocode": 0.0, "none": 0.0} for d in days}
+
+    def _bucket(src: str) -> str:
+        s = (src or "").strip().lower()
+        if "promo" in s:    return "promocode"
+        if "personal" in s: return "personal"
+        if "general" in s:  return "general"
+        if not s:           return "none"
+        if "+" in s:  # комбинированные значения
+            parts = s.split("+")
+            if any("promo" in p for p in parts):    return "promocode"
+            if any("personal" in p for p in parts): return "personal"
+            if any("general" in p for p in parts):  return "general"
+        return "none"
+
+    per_day = (
+        payments_q
+        .annotate(day=F("created_at__date"))
+        .values("day", "appointment__discount_source")
+        .annotate(total=Coalesce(Sum("amount"), Value(Decimal("0.00"))))
+    )
+    for row in per_day:
+        d = row["day"].isoformat() if hasattr(row["day"], "isoformat") else str(row["day"])
+        b = _bucket(row.get("appointment__discount_source"))
+        if d in daily:
+            daily[d][b] += float(row["total"])
+
+    chart = {
+        "labels": list(daily.keys()),
+        "general":  [daily[d]["general"]   for d in daily],
+        "personal": [daily[d]["personal"]  for d in daily],
+        "promocode":[daily[d]["promocode"] for d in daily],
+        "none":     [daily[d]["none"]      for d in daily],
+    }
+
+    # ── Разбивка по ServiceDiscount (uses/saved по айтемам; revenue — как было от цен, по платежам можно сделать отдельно)
+    # Использования: позиции в валидных аппоинтментах с активной скидкой услуги на дату визита
+    discount_filters = (
+            Q(service__appointmentitem__appointment__in=base_appt_q) &
+            Q(service__appointmentitem__appointment__start_time__date__gte=F("start_date")) &
+            Q(service__appointmentitem__appointment__start_time__date__lte=F("end_date")) &
+            Q(service__appointmentitem__discount_source="service")
+    )
+    discount_breakdown = (
+        ServiceDiscount.objects
+        .select_related("service")
+        .annotate(
+            uses=Count("service__appointmentitem", filter=discount_filters),
+            revenue=Coalesce(  # по позициям (как раньше)
+                Sum("service__appointmentitem__final_price", filter=discount_filters),
+                Value(Decimal("0"))
+            ),
+            saved=Coalesce(
+                Sum(
+                    (F("service__appointmentitem__unit_price") - F("service__appointmentitem__final_price")),
+                    filter=discount_filters
+                ),
+                Value(Decimal("0"))
+            ),
+        )
+        .filter(uses__gt=0)
+        .order_by("-uses", "-revenue")
+    )
+
+    # ── Разбивка по промокодам: uses — по позициям; revenue — платежи визита,
+    #     распределённые пропорционально сумме final_price позиций с этим кодом в визите.
+    # Платежи по визиту
+    pay_by_appt = dict(
+        payments_q.values("appointment_id")
+        .annotate(total=Coalesce(Sum("amount"), Value(Decimal("0"))))
+        .values_list("appointment_id", "total")
+    )
+
+    # Сумма final по промо-позициям в визите и веса по конкретным кодам
+    promo_rows = (
+        AppointmentItemPromoCode.objects
+        .select_related("item__appointment", "promocode")
+        .filter(item__appointment__in=base_appt_q)
+        .values("promocode__code", "item__appointment_id")
+        .annotate(weight=Coalesce(Sum("item__final_price"), Value(Decimal("0"))),
+                  uses=Count("id"))
+    )
+
+    weights_per_appt = defaultdict(Decimal)  # сумма весов по визиту
+    rows_per_code_appt = defaultdict(list)   # [(code, appt_id, weight, uses)]
+    for r in promo_rows:
+        code = r["promocode__code"]
+        aid  = r["item__appointment_id"]
+        w    = r["weight"] or Decimal("0")
+        u    = r["uses"] or 0
+        weights_per_appt[aid] += w
+        rows_per_code_appt[(code, aid)].append((w, u))
+
+    promo_totals = defaultdict(lambda: {"uses": 0, "revenue": Decimal("0")})
+    for (code, aid), lst in rows_per_code_appt.items():
+        paid = pay_by_appt.get(aid, Decimal("0"))
+        total_w = weights_per_appt.get(aid, Decimal("0")) or Decimal("0")
+        # если нет весов — делим поровну между кодами визита
+        denom = total_w if total_w > 0 else Decimal(len({c for (c, a) in rows_per_code_appt if a == aid}) or 1)
+        share = paid * (sum(w for w, _ in lst) / denom) if total_w > 0 else paid / denom
+        promo_totals[code]["uses"] += sum(u for _, u in lst)
+        promo_totals[code]["revenue"] += share
+
+    promo_breakdown = [
+        {"code": code, "uses": data["uses"], "revenue": data["revenue"]}
+        for code, data in promo_totals.items()
+    ]
+    promo_breakdown.sort(key=lambda x: (-x["uses"], -x["revenue"]))
+
+    # ── Клиентские источники (stacked/таблица/бар) — всё по платежам
+    src_attr, how_attr = "source", "how_heard"
+    try:
+        src_field = UserProfile._meta.get_field(src_attr)
+    except Exception:
+        src_attr = "how_heard"
+        src_field = UserProfile._meta.get_field(src_attr)
+    src_choices = list(getattr(src_field, "choices", [])) or []
+    try:
+        how_field = UserProfile._meta.get_field(how_attr)
+        how_choices = list(getattr(how_field, "choices", [])) or []
+    except Exception:
+        how_choices = []
+    if ("unknown", "Unknown") not in src_choices:
+        src_choices.append(("unknown", "Unknown"))
+    if how_choices and ("unknown", "Unknown") not in how_choices:
+        how_choices.append(("unknown", "Unknown"))
+
+    def _norm(v): return ("" if v is None else str(v)).strip()
+    def _is_online(v): return _norm(v).lower() == "online"
+
+    expanded_categories = []
+    for s_val, s_label in src_choices:
+        if _is_online(s_val) and how_choices:
+            for h_val, h_label in how_choices:
+                expanded_categories.append((f"online::{h_val}", f"{s_label} — {h_label}"))
+        else:
+            expanded_categories.append((s_val, s_label))
+
+    labels = [d.isoformat() for d in days]
+    label_index = {s: i for i, s in enumerate(labels)}
+    series = {key: [0.0] * len(labels) for key, _ in expanded_categories}
+
+    src_path = f"appointment__client__{src_attr}"
+    how_path = f"appointment__client__{how_attr}"
+
+    rows = (
+        payments_q
+        .annotate(day=F("created_at__date"))
+        .values("day", src_path, how_path)
+        .annotate(total=Coalesce(Sum("amount"), Value(Decimal("0"))))
+    )
+
+    def _key_for_row(src_val, how_val) -> str:
+        s = _norm(src_val) or "unknown"
+        if _is_online(s) and how_choices:
+            h = _norm(how_val) or "unknown"
+            return f"online::{h}"
+        return s or "unknown"
+
+    for r in rows:
+        d = r["day"].isoformat() if hasattr(r["day"], "isoformat") else str(r["day"])
+        j = label_index.get(d)
+        if j is None:
+            continue
+        key = _key_for_row(r.get(src_path), r.get(how_path))
+        if key not in series:
+            # если всплыла новая how_heard — добавим
+            label = key
+            if key.startswith("online::"):
+                h_val = key.split("::", 1)[1]
+                h_label = next((lbl for val, lbl in how_choices if val == h_val), h_val.title().replace("_", " "))
+                s_label = next((lbl for val, lbl in src_choices if _is_online(val)), "Online")
+                label = f"{s_label} — {h_label}"
+            expanded_categories.append((key, label))
+            series[key] = [0.0] * len(labels)
+        series[key][j] += float(r["total"])
+
+    # Таблица totals по категориям (revenue по платежам, appts/clients — по платежам этого периода)
+    totals = {key: {"revenue": 0.0, "appts": set(), "clients": set()} for key, _ in expanded_categories}
+    rows_total = (
+        payments_q
+        .values(src_path, how_path, "appointment_id", "appointment__client_id")
+        .annotate(revenue=Coalesce(Sum("amount"), Value(Decimal("0"))))
+    )
+    for r in rows_total:
+        key = _key_for_row(r.get(src_path), r.get(how_path))
+        t = totals.setdefault(key, {"revenue": 0.0, "appts": set(), "clients": set()})
+        t["revenue"] += float(r["revenue"])
+        if r.get("appointment_id"):
+            t["appts"].add(r["appointment_id"])
+        if r.get("appointment__client_id"):
+            t["clients"].add(r["appointment__client_id"])
+
+    client_source_table = [
+        {
+            "key": key,
+            "label": label,
+            "revenue": round(totals[key]["revenue"], 2),
+            "appts": len(totals[key]["appts"]),
+            "clients": len(totals[key]["clients"]),
+        }
+        for key, label in expanded_categories
+    ]
+
+    client_source_stacked = {
+        "labels": labels,
+        "datasets": [{"key": key, "label": label, "data": series[key]} for key, label in expanded_categories],
+    }
+
+    # Бар «total revenue by source» — по платежам
+    src_bar_rows = (
+        payments_q
+        .values(src_path)
+        .annotate(revenue=Coalesce(Sum("amount"), Value(Decimal("0"))))
+        .order_by("-revenue")
+    )
+    client_source_stats = [{"label": (_norm(r.get(src_path)) or "unknown"), "revenue": r["revenue"]} for r in src_bar_rows]
+    src_labels = [r["label"] for r in client_source_stats]
+    src_revenue = [float(r["revenue"]) for r in client_source_stats]
+
+
+    if request.GET.get("export") == "xlsx":
+        exporter = ExportXlsxMixin()  # просто используем миксин как helper
+        wb = exporter.build_statistics_workbook(
+            start=start, end=end,
+            kpi_total_revenue=kpi_total_revenue,
+            kpi_total_appointments=kpi_total_appointments,
+            kpi_with_discount=kpi_with_discount,
+            top_bookers=list(top_bookers),
+            top_spenders=list(top_spenders),
+            ds_totals=list(ds_totals),
+            discount_breakdown=list(discount_breakdown),
+            promo_breakdown=list(promo_breakdown),
+            client_source_table=list(client_source_table),
+        )
+        return exporter._wb_response(wb, "statistics.xlsx")
+
+    # === иначе — рендерим страницу и даём ссылку на экспорт с текущими фильтрами ===
+    params = request.GET.copy()
+    params["export"] = "xlsx"
+
+    export_xlsx_url = f"{request.path}?{params.urlencode()}"  # сохраняет все фильтры + export=xlsx
+    # ── Контекст для шаблона
+    context = {
+        "title": "Statistics",
+        "start": start,
+        "end": end,
+        "kpi": {
+            "revenue": kpi_total_revenue,
+            "appointments": kpi_total_appointments,
+            "with_discount": kpi_with_discount,
+        },
+        "top_bookers": list(top_bookers),
+        "top_spenders": list(top_spenders),
+        "ds_totals": list(ds_totals),
+        "discount_breakdown": list(discount_breakdown),
+        "promo_breakdown": list(promo_breakdown),
+        "chart": chart,
+
+        "client_source_stats": client_source_stats,
+        "client_source_chart": {"labels": src_labels, "revenue": src_revenue},
+
+        "client_source_stacked": client_source_stacked,
+        "client_source_table": client_source_table,
+        "export_xlsx_url": export_xlsx_url
+    }
+    return render(request, "admin/statistics.html", context)
+
+def _inject_admin_urls(original_get_urls):
+    def get_urls():
+        my = [
+            path("stats/", admin.site.admin_view(stats_view), name="stats"),
+        ]
+        return my + original_get_urls()
+    return get_urls
+
+admin.site.get_urls = _inject_admin_urls(admin.site.get_urls)
+
+def get_price_html(service):
+    discount = service.get_active_discount()
+    if discount:
+        discounted = service.get_discounted_price()
+        return format_html(
+            '<span style="text-decoration: line-through; color: grey;">${}</span><br><strong>${}</strong>',
+            service.base_price,
+            discounted
+        )
+    return format_html("<strong>${}</strong>", service.base_price)
+
+
+
+def createTable(selected_date, time_pointer, end_time, slot_times, items, masters, availabilities):
+    """
+    items: QuerySet[AppointmentItem] с select_related('appointment__client','service','master')
+    masters: список мастеров для колонок
+    """
+    COLOR_PALETTE = ["#E4D08A", "#EDC2A2", "#CEAEC6", "#A3C1C9", "#C3CEA3", "#E7B3C3"]
+    master_ids = [m.id for m in masters]
+    MASTER_COLORS = dict(zip(master_ids, cycle(COLOR_PALETTE)))
+
+    # ───── badges для позиции ───────────────────────────────────────────────────
+    def _corner_badges_for_item(item):
+        # скидка: если установлен промокод/персональная скидка на уровне позиции
+        promo_html = ""
+        base = item.unit_price if getattr(item, "unit_price", None) is not None else item.service.base_price
+        final = getattr(item, "final_price", None)
+        has_promo_rel = getattr(item, "promocode_link", None) is not None
+        if has_promo_rel or (final is not None and str(final) != str(base)):
+            promo_html = "<span class='badge badge--promo' title='Applied discount'>%</span>"
+
+        # здоровье (по клиенту Appointment)
+        def _health_flag_info(appt):
+            prof = getattr(appt, "client", None)
+            if not prof:
+                return False, "", ""
+            hc = getattr(prof, "health", None) or getattr(prof, "health_conditions", None) or {}
+            def _to_str(v):
+                if isinstance(v, (list, tuple)): return ", ".join(map(str, v))
+                return (v or "").strip()
+            has_all = bool(hc.get("has_allergies")) or bool(_to_str(hc.get("allergies_text")))
+            has_med = bool(_to_str(hc.get("medications")))
+            has_ctr = bool(_to_str(hc.get("contraindications")))
+            has_ch = bool(_to_str(hc.get("chronic_conditions")))
+            if not (has_all or has_med or has_ctr or has_ch):
+                return False, "", ""
+            try:
+                url = reverse("health-view-master", args=[prof.id])
+            except NoReverseMatch:
+                url = ""
+            return True, url, "Есть важные данные в анкете здоровья — нажмите, чтобы посмотреть"
+
+        health_html = ""
+        show_flag, flag_url, flag_title = _health_flag_info(item.appointment)
+
+        if show_flag:
+            ico = "⚕️"
+            health_html = (
+                f'<a class="badge badge--health" href="{flag_url}" title="{flag_title}">{ico}</a>'
+                if flag_url else f'<span class="badge badge--health" title="{flag_title}">{ico}</span>'
+            )
+        if not promo_html and not health_html:
+            return ""
+        return f"<div class='corner-badges'>{promo_html}{health_html}</div>"
+
+    # ───── вспомогательные ──────────────────────────────────────────────────────
+    def _item_meta(item, master_obj):
+        s_local = localtime(item.start_time)
+        # duration берём из Item (в нём уже может быть extra_time учтён)【:contentReference[oaicite:3]{index=3}】
+        total_min = int(getattr(item, "duration_min", 0) or 0)
+        e_local = s_local + timedelta(minutes=total_min)
+
+        # Статус — по родительскому Appointment (последний из истории)
+        last_status = item.appointment.appointmentstatushistory_set.order_by("-set_at").first()
+        status_name = last_status.status.name if last_status else "Unknown"
+        items_count = len(list(item.appointment.items.all()))
+        # Цены: базовая для позиции (unit_price или base_price услуги),
+        # финальная — из item.final_price (если None, показываем базовую)
+        base_price = item.appointment.total_without_discounts(ignore_overrides=False)
+        final_price = item.appointment.final_price
+
+
+        client = item.appointment.client
+        client_label = client.get_full_name() or client.user.username
+
+        return {
+            "s_local": s_local,
+            "e_local": e_local,
+            "status": status_name,
+            "master_label": escape(str(master_obj)),
+            "client_label": escape(client_label),
+            "service_label": escape(item.service.name),
+            "time_label": f"{s_local.strftime('%I:%M%p').lstrip('0')} - {e_local.strftime('%I:%M%p').lstrip('0')}",
+            "duration_label": f"{total_min}min",
+            "base_price": f"${base_price}",
+            "items_count": items_count,
+            "final_price": f"${final_price}",
+            "phone": escape(getattr(client, "phone", "") or ""),
+        }
+
+    def _cell_html_item(item, meta, show_cancelled=False):
+        cancelled_suffix = " (Cancelled)" if show_cancelled else ""
+        opacity = ".7" if show_cancelled else "1"
+        corner = _corner_badges_for_item(item)
+        footer = f"<div class='cell-mini-footer'>{meta['items_count']} services</div>" if meta.get('items_count', 1) > 1 else ""
+        return f"""
+        {corner}
+        <div style="opacity:{opacity}; ">
+          <div style="font-size:1.8vh;">
+            {meta['s_local'].strftime('%I:%M').lstrip('0')} – {meta['e_local'].strftime('%I:%M').lstrip('0')}
+            <strong>{meta['client_label']}</strong>
+          </div>
+          <div style="font-size:1.8vh;">
+            {meta['service_label']}{cancelled_suffix}
+          </div>
+          {footer}
+        </div>
+        """
+
+    def _make_item_cell(kind, item, rowspan, colspan, master_obj, bg, show_cancelled=False):
+        meta = _item_meta(item, master_obj)
+        return {
+            "rowspan": rowspan,
+            "colspan": colspan,
+            "kind": kind,
+            "appt_id": item.appointment_id,  # важно для ссылки клика по шаблону【:contentReference[oaicite:4]{index=4}】
+            "html": _cell_html_item(meta=meta, item=item, show_cancelled=show_cancelled),
+            "background": bg,
+            "appointment": item,  # шаблон проверяет наличие cell.appointment для ветки рендера【:contentReference[oaicite:5]{index=5}】
+            "client": meta["client_label"],
+            "phone": meta["phone"],
+            "service": meta["service_label"],
+            "status": meta["status"],
+            "master": meta["master_label"],
+            "time_label": meta["time_label"],
+            "duration": meta["duration_label"],
+            "base_price": meta["base_price"],
+            "final_price": meta["final_price"],
+            "items_count": meta["items_count"],
+        }
+
+    def _make_unavail_cell(kind, rowsp, colspan, avail_id, reason, from_s, to_s, until_s):
+        return {
+            "rowspan": rowsp,
+            "colspan": colspan,
+            "kind": kind,
+            "availability_id": avail_id,
+            "html": f"""
+                <div style="opacity:.85">
+                  {escape(reason)}<br>
+                  <small>{escape(from_s)}–{escape(to_s)}</small>
+                </div>
+            """,
+            "unavailable": True,
+            "reason": reason,
+            "start": from_s,
+            "end": to_s,
+            "until": until_s,
+        }
+
+    # ───── сетка времени ────────────────────────────────────────────────────────
+    while time_pointer <= end_time:
+        slot_times.append(time_pointer.strftime("%H:%M"))
+        time_pointer += timedelta(minutes=15)
+
+    two_col_map = {}
+    cancel_lanes = {}
+    skip_two = {}
+    skip_lane = {}
+    for m in masters:
+        mid = m.id
+        two_col_map[mid] = {}
+        cancel_lanes[mid] = {0: {}, 1: {}}
+        skip_two[mid] = {}
+        skip_lane[mid] = {0: {}, 1: {}}
+
+    # статус Cancelled
+    cancelled_status = AppointmentStatus.objects.filter(name="Cancelled").first()
+    cancelled_id = getattr(cancelled_status, "id", None)
+
+    # ───── позиции (AppointmentItem) ────────────────────────────────────────────
+    for item in items:
+        start_local = localtime(item.start_time)
+        if start_local.date() != selected_date:
+            continue
+
+        mid = item.master_id
+        slot_key = start_local.strftime("%H:%M")
+        total_min = int(getattr(item, "duration_min", 0) or 0)
+        rowspan = max(1, (-(-total_min // 15)))  # ceil
+
+        last_status = item.appointment.appointmentstatushistory_set.order_by("-set_at").first()
+        is_cancelled = bool(last_status and last_status.status_id == cancelled_id)
+
+        if not is_cancelled:
+            two_col_map[mid][slot_key] = {
+                "kind": "appt_active",
+                "rowspan": rowspan,
+                "colspan": 2,
+                "item": item,
+            }
+            for i in range(rowspan):
+                t = (start_local + timedelta(minutes=15 * i)).strftime("%H:%M")
+                skip_two[mid][t] = True
+        else:
+            lane0_busy = skip_lane[mid][0].get(slot_key) or (slot_key in cancel_lanes[mid][0])
+            lane = 0 if not lane0_busy else 1
+            cancel_lanes[mid][lane][slot_key] = {
+                "kind": "appt_cancelled",
+                "rowspan": rowspan,
+                "colspan": 1,
+                "item": item,
+            }
+            for i in range(rowspan):
+                t = (start_local + timedelta(minutes=15 * i)).strftime("%H:%M")
+                skip_lane[mid][lane][t] = True
+
+    # ───── тайм-офф (перерывы/отпуска) ─────────────────────────────────────────
+    for period in availabilities:
+        mid = int(getattr(period.master, "id", period.master))
+        start = localtime(period.start_time)
+        end = localtime(period.end_time)
+        if start.date() > selected_date or end.date() < selected_date:
+            continue
+
+        day_start = datetime.combine(selected_date, time(8, 0)).replace(tzinfo=start.tzinfo)
+        day_end = datetime.combine(selected_date, time(21, 15)).replace(tzinfo=start.tzinfo)
+        block_start = max(start, day_start)
+        block_end = min(end, day_end)
+        if block_start >= block_end:
+            continue
+
+        minutes = int((block_end - block_start).total_seconds() // 60)
+        rowsp = max(1, (-(-minutes // 15)))  # ceil
+        slot_key = block_start.strftime("%H:%M")
+
+        if slot_key not in two_col_map.get(mid, set()):
+            if mid not in two_col_map:
+                two_col_map[mid] = {}
+            two_col_map[mid][slot_key] = {
+                "kind": "unavailable",
+                "rowspan": rowsp,
+                "colspan": 2,
+                "reason": period.get_reason_display(),
+                "from": block_start.strftime("%I:%M%p").lstrip("0"),
+                "to": block_end.strftime("%I:%M%p").lstrip("0"),
+                "until": period.end_time.strftime("%d %b %Y"),
+                "availability_id": period.id,
+            }
+            for i in range(rowsp):
+                t = (block_start + timedelta(minutes=15 * i)).strftime("%H:%M")
+                if mid not in skip_two:
+                    skip_two[mid] = {}
+                skip_two[mid][t] = True
+
+    # ───── финальная сборка строк ──────────────────────────────────────────────
+    calendar_table = []
+
+    for time_str in slot_times:
+        row = {"time": time_str, "cells": []}
+
+        for master in masters:
+            mid = master.id
+
+            # 1) старт двухколоночной?
+            if time_str in two_col_map[mid]:
+                cell = two_col_map[mid][time_str]
+
+                # Проверяем конфликт с отменённой слева
+                try:
+                    start_idx = slot_times.index(time_str)
+                except ValueError:
+                    start_idx = 0
+                span_times = slot_times[start_idx:start_idx + cell["rowspan"]]
+                overlaps_cancel_left = any(skip_lane[mid][0].get(t) for t in span_times)
+
+                if not overlaps_cancel_left:
+                    if cell["kind"] == "appt_active":
+                        row["cells"].append(
+                            _make_item_cell(
+                                kind="appt_active",
+                                item=cell["item"],
+                                rowspan=cell["rowspan"],
+                                colspan=2,
+                                master_obj=master,
+                                bg=MASTER_COLORS.get(mid),
+                                show_cancelled=False,
+                            )
+                        )
+                    else:
+                        row["cells"].append(
+                            _make_unavail_cell(
+                                kind="unavailable",
+                                rowsp=cell["rowspan"],
+                                colspan=2,
+                                avail_id=cell["availability_id"],
+                                reason=cell["reason"],
+                                from_s=cell["from"],
+                                to_s=cell["to"],
+                                until_s=cell["until"],
+                            )
+                        )
+                    continue
+
+                # Перенос вправо (lane-right)
+                for t in span_times:
+                    skip_lane[mid][1][t] = True
+
+                c0 = cancel_lanes[mid][0].get(time_str)
+                if c0:
+                    row["cells"].append(
+                        _make_item_cell(
+                            kind="appt_cancelled",
+                            item=c0["item"],
+                            rowspan=c0["rowspan"],
+                            colspan=1,
+                            master_obj=master,
+                            bg=MASTER_COLORS.get(mid),
+                            show_cancelled=True,
+                        )
+                    )
+                elif not skip_lane[mid][0].get(time_str):
+                    row["cells"].append({
+                        "rowspan": 1, "colspan": 1, "kind": "free_half",
+                        "master_id": mid, "html": "", "lane": "left"
+                    })
+
+                # правая половина переносимого блока
+                row["cells"].append(
+                    _make_item_cell(
+                        kind="appt_active_right" if cell["kind"] == "appt_active" else "unavailable_right",
+                        item=cell.get("item"),
+                        rowspan=cell["rowspan"],
+                        colspan=1,
+                        master_obj=master,
+                        bg=MASTER_COLORS.get(mid),
+                        show_cancelled=False,
+                    ) if cell["kind"] == "appt_active" else
+                    _make_unavail_cell(
+                        kind="unavailable_right",
+                        rowsp=cell["rowspan"],
+                        colspan=1,
+                        avail_id=cell["availability_id"],
+                        reason=cell["reason"],
+                        from_s=cell["from"],
+                        to_s=cell["to"],
+                        until_s=cell["until"],
+                    )
+                )
+                continue
+
+            # 2) lane-режим (отменённые/перенесённые)
+            lane0_start = time_str in cancel_lanes[mid][0]
+            lane0_skip = bool(skip_lane[mid][0].get(time_str))
+            lane1_skip = bool(skip_lane[mid][1].get(time_str))
+            lane_mode = lane0_start or lane0_skip or lane1_skip
+
+            if lane_mode:
+                # левая половинка
+                c0 = cancel_lanes[mid][0].get(time_str)
+                if c0:
+                    row["cells"].append(
+                        _make_item_cell(
+                            kind="appt_cancelled",
+                            item=c0["item"],
+                            rowspan=c0["rowspan"],
+                            colspan=1,
+                            master_obj=master,
+                            bg=MASTER_COLORS.get(mid),
+                            show_cancelled=True,
+                        )
+                    )
+                elif not lane0_skip:
+                    row["cells"].append({
+                        "rowspan": 1, "colspan": 1, "kind": "free_half",
+                        "master_id": mid, "html": "", "lane": "left"
+                    })
+
+                # правая половинка
+                if not lane1_skip:
+                    row["cells"].append({
+                        "rowspan": 1, "colspan": 1, "kind": "free_half",
+                        "master_id": mid, "html": "", "lane": "right"
+                    })
+                continue
+
+            # 3) продолжающиеся двухколоночные
+            if skip_two[mid].get(time_str):
+                continue
+
+            # 4) дефолтная свободная двухколоночная
+            row["cells"].append({
+                "rowspan": 1,
+                "colspan": 2,
+                "kind": "free",
+                "master_id": mid,
+                "html": "",
+            })
+
+        calendar_table.append(row)
+
+    return calendar_table
+
+
+def _health_flag_info(appt):
+    """
+    True/False + (url|""), title — нужно ли показывать флаг здоровья.
+    Поддерживает и profile.health, и profile.health_conditions.
+    """
+    prof = getattr(appt, "client", None)
+    if not prof:
+        return False, "", ""
+
+    hc = getattr(prof, "health", None) or getattr(prof, "health_conditions", None) or {}
+
+    def _to_str(v):
+        if isinstance(v, (list, tuple)):
+            return ", ".join(map(str, v))
+        return (v or "").strip()
+
+    has_all = bool(hc.get("has_allergies")) or bool(_to_str(hc.get("allergies")))
+    has_med = bool(_to_str(hc.get("medications")))
+    has_ctr = bool(_to_str(hc.get("contraindications")))
+
+    if not (has_all or has_med or has_ctr):
+        return False, "", ""
+
+    try:
+        url = reverse("health-view-master", args=[prof.id])
+    except NoReverseMatch:
+        url = ""
+
+    return True, url, "Есть важные данные в анкете здоровья — нажмите, чтобы посмотреть"
+
+def _corner_badges_html(appt, appt_promocode):
+    """
+    Возвращает HTML «уголка» со значками (скидка + здоровье).
+    Вызываем внутри карточки визита, у родителя должен быть position:relative.
+    """
+    # скидка
+    promo_html = ""
+    if appt_promocode or appt.final_price != appt.service.base_price:
+        promo_html = "<span class='badge badge--promo' title='Applied discount'>%</span>"
+
+    # здоровье
+    show_flag, flag_url, flag_title = _health_flag_info(appt)
+    health_html = ""
+    if show_flag:
+        ico = "⚕️"  # можно заменить на 🩺
+        if flag_url:
+            health_html = f'<a class="badge badge--health" href="{flag_url}" title="{flag_title}">{ico}</a>'
+        else:
+            health_html = f'<span class="badge badge--health" title="{flag_title}">{ico}</span>'
+
+    if not promo_html and not health_html:
+        return ""
+
+    return f"<div class='corner-badges'>{promo_html}{health_html}</div>"
+
+# core/admin.py
+from django.db import connection
+
+def custom_index(request):
+    from django.template.response import TemplateResponse
+
+    tables = set(connection.introspection.table_names())
+    userprof = None
+    if "core_userprofile" in tables:
+        try:
+            userprof = getattr(request.user, "userprofile", None)
+        except Exception:
+            userprof = None
+
+    ctx = {"userprof": userprof}
+    return TemplateResponse(request, "admin/index.html", ctx)

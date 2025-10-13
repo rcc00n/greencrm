@@ -1,0 +1,2266 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title data-i18n="services.meta.title">Malva Booking — Services</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="{% static 'js/i18n.js' %}"></script>
+  <script src="https://js.stripe.com/v3/"></script>
+
+  <style>
+    /* =========================
+       Design tokens
+       ========================= */
+    :root{
+      --green-dark:#204029; --green:#1F5C3A; --green-600:#2e5a3a;
+      --gold:#AF9525; --taupe:#DAD3C1; --lgray:#DEDEDE; --dgray:#4D4D4D; --white:#FFF;
+
+      --bg-grad-1:#EFF4F2; --bg-grad-2:#EEF3F0;
+      --ink: color-mix(in srgb, var(--green-dark) 80%, #000);
+      --muted: color-mix(in srgb, var(--dgray) 70%, var(--green-dark) 20%);
+
+      --free:#1F5C3A; --busy:#D32F2F; --today-bg:#FAFDFB; --grid-border:#E6E7E7; --chip-bg:#F3F7F5;
+
+      --radius-lg:1.25rem; --radius-md:.75rem; --radius-sm:.55rem;
+      --shadow:0 8px 20px rgba(0,0,0,.10);
+      --container:clamp(280px,92vw,1160px);
+
+      /* >>> ШРИФТЫ: как в твоём примере (Inter) <<< */
+      --font-ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;
+      --font-heading:var(--font-ui);
+    }
+
+    /* =========================
+       Base
+       ========================= */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{font-size:16px;scroll-behavior:smooth}
+    body{
+      font-family:var(--font-ui); color:var(--ink); line-height:1.5;
+      background:
+        radial-gradient(60% 120% at 15% 110%, color-mix(in srgb, var(--green) 10%, transparent) 0%, transparent 62%),
+        radial-gradient(60% 120% at 80% -10%,  color-mix(in srgb, var(--green) 12%, transparent) 0%, transparent 62%),
+        linear-gradient(135deg, var(--bg-grad-1) 0%, var(--bg-grad-2) 100%);
+    }
+    img{max-width:100%;display:block}
+    a{color:inherit;text-decoration:none}
+    .container{width:var(--container);margin-inline:auto;padding-inline:1rem}
+
+    /* =========================
+       Buttons
+       ========================= */
+    .btn{
+      display:inline-flex; align-items:center; justify-content:center; gap:.5em;
+      padding:.7rem 1.15rem; border-radius:var(--radius-sm);
+      font-weight:800; cursor:pointer; transition:.2s ease; white-space:nowrap; user-select:none; line-height:1;
+      font-family:var(--font-heading);
+    }
+    .btn:focus-visible{outline:2px solid color-mix(in srgb, var(--gold) 70%, #fff); outline-offset:2px}
+    .btn--primary{background:linear-gradient(135deg, var(--green-600) 0%, var(--gold) 100%); color:#fff; border:0}
+    .btn--primary:hover{transform:translateY(-1px); filter:brightness(1.03); box-shadow:0 4px 14px rgba(175,149,37,.35)}
+    .btn--loading{position:relative;pointer-events:none;opacity:.8}
+    .btn--loading::after{content:'';position:absolute;width:1rem;height:1rem;border:2px solid rgba(255,255,255,.9);border-top-color:transparent;border-radius:999px;right:.75rem;animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    .btn--ghost{background:linear-gradient(135deg, var(--green-600) 0%, var(--gold) 100%); color:#fff; border:0}
+    .btn--ghost:hover{transform:translateY(-1px); filter:brightness(1.03); box-shadow:0 4px 14px rgba(175,149,37,.35)}
+    .btn--ghost[disabled], .btn--primary[disabled]{opacity:.5;cursor:not-allowed}
+
+    /* =========================
+       Header & Hero
+       ========================= */
+    .site-header{background:var(--green-dark);box-shadow:var(--shadow);position:sticky;top:0;z-index:100;padding-block:.75rem}
+    .site-header__inner{display:flex;align-items:center;justify-content:space-between}
+    .logo{font:900 1.25rem/1 var(--font-heading);color:var(--gold);letter-spacing:.3px}
+    .header-actions{display:flex;align-items:center;gap:.75rem;margin-left:auto}
+    .lang-picker{display:inline-flex;align-items:center;gap:.4rem;margin-right:.5rem;color:var(--taupe);font-size:.82rem}
+    .lang-picker__label{opacity:.75;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+    .lang-picker__select{appearance:none;background:rgba(255,255,255,.12);color:#111;border:1px solid rgba(255,255,255,.25);padding:.35rem .75rem;border-radius:.55rem;font-weight:600;cursor:pointer;min-width:5.5rem}
+    .lang-picker__select:focus{outline:2px solid color-mix(in srgb, var(--gold) 70%, #fff);outline-offset:2px}
+    .cart-bubble{display:inline-flex;align-items:center;justify-content:center;min-width:1.5rem;padding:0 .35rem;border-radius:999px;background:rgba(255,255,255,.2);font-size:.85rem;font-weight:700}
+
+    .hero{
+      display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:1.1rem;
+      padding:5.25rem 1rem;
+      background:
+        radial-gradient(60% 120% at 82% -10%, color-mix(in srgb, var(--green) 18%, transparent) 0%, transparent 60%),
+        linear-gradient(135deg, color-mix(in srgb, #fff 90%, var(--bg-grad-1) 10%) 0%, color-mix(in srgb, var(--bg-grad-2) 90%, #fff 10%) 100%);
+      border-bottom:1px solid color-mix(in srgb, var(--green) 12%, transparent);
+    }
+    .hero h1{font:900 clamp(2rem,4vw,3.2rem)/1.1 var(--font-heading); color:var(--green-dark)}
+    .hero p{font-size:1.08rem; max-width:52ch; color:var(--muted)}
+
+    .mobile-nav-btn{display:none;align-items:center;justify-content:center;width:2.75rem;height:2.75rem;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.08);color:var(--taupe);font-size:1.35rem;transition:.2s ease;}
+    .mobile-nav-btn:active{transform:scale(.94);}
+    .mobile-nav-backdrop{display:none;}
+    .mobile-close{display:none;}
+    .floating-cart{display:none;}
+
+    h2{font:900 1.5rem/1.2 var(--font-heading)}
+    h3{font:800 1.1rem/1.2 var(--font-heading)}
+
+    /* =========================
+       Filters & Cards
+       ========================= */
+    .filters{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.25rem 0 1.75rem}
+    .filters input,.filters select{
+      padding:.6rem 1rem; border:1px solid color-mix(in srgb, var(--green) 22%, var(--lgray));
+      border-radius:var(--radius-sm); font-size:.95rem; min-width:170px; background:#fff
+    }
+    .services-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1.25rem}
+    .service-card{
+      background:#fff;border-radius:var(--radius-lg);padding:1.1rem;display:flex;flex-direction:column;gap:.75rem;
+      box-shadow:var(--shadow);border:1px solid color-mix(in srgb, var(--green) 18%, transparent);transition:.18s ease;
+    }
+    .service-card:hover{transform:translateY(-3px);box-shadow:0 10px 22px color-mix(in srgb, var(--green) 18%, rgba(0,0,0,.16))}
+    .service-card__img{aspect-ratio:16/9;background:color-mix(in srgb, var(--green) 10%, #fff);border-radius:.7rem;overflow:hidden;position:relative}
+    .service-card__img img{width:100%;height:100%;object-fit:cover;display:block}
+    .service-card__img--empty{display:flex;align-items:center;justify-content:center;font-size:.9rem;color:#6f7a75}
+    .service-card h3{font-size:1.06rem;font-weight:900;color:var(--ink)}
+    .service-meta{font-size:.92rem;color:var(--muted)}
+    .stub{font-style:italic;color:#667;padding:1rem}
+    .muted{color:var(--muted);font-size:.92rem}
+    .old{color:#9aa0a0;text-decoration:line-through}
+    .badge{font-size:.75rem;background:var(--gold);color:#fff;border-radius:999px;padding:.18rem .55rem;margin-left:.35rem}
+
+    /* =========================
+       Footer
+       ========================= */
+    .site-footer{text-align:center;font-size:.875rem;color:var(--muted);padding:2rem 1rem}
+
+    /* =========================
+       Modal
+       ========================= */
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.42);display:none;align-items:center;justify-content:center;padding:1rem;z-index:1000;overscroll-behavior:contain}
+    .modal--open{display:flex}
+    .modal__dialog{
+      background:#fff;border-radius:1rem;box-shadow:0 14px 36px rgba(0,0,0,.22);
+      width:min(940px,96vw); border:1px solid color-mix(in srgb, var(--green) 14%, var(--lgray));
+      padding:1.2rem 1.25rem 1rem; max-height:92vh; display:flex; flex-direction:column; overflow:hidden;
+    }
+    .modal__dialog--payment{
+      width:min(960px,96vw);
+      max-height:88vh;
+      padding:0;
+    }
+    .modal__dialog--payment .modal__header{padding:1.5rem 1.75rem 0;margin-bottom:1rem}
+    .modal__dialog--payment .modal__title{font-size:1.35rem}
+    .modal__dialog--payment .payment-body{flex:1 1 auto;padding:0 1.75rem 1.75rem;overflow-y:auto;scrollbar-gutter:stable}
+    .modal__dialog--payment .modal__footer{padding:1.1rem 1.75rem;border-top:1px solid color-mix(in srgb, var(--green) 10%, #dadada);background:#fff;position:sticky;bottom:0}
+    .modal__header{display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:1rem}
+    .modal__title{font:900 1.18rem/1 var(--font-heading); color:var(--green)}
+    .modal__close{background:transparent;border:none;font-size:1.4rem;line-height:1;cursor:pointer;color:var(--muted)}
+    .grid-2{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr);gap:1rem;flex:1 1 auto;min-height:0}
+    .grid-2 > div{min-height:0}
+    .field{display:flex;flex-direction:column;gap:.35rem}
+    .field label{font-size:.9rem;color:#555}
+    .field input,.field select{padding:.6rem .8rem;border:1px solid var(--lgray);border-radius:.6rem;font-size:.95rem;background:#fff}
+
+    .modal__footer{display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem}
+    .modal__dialog--narrow{width:min(540px,96vw)}
+    .cart-list{display:flex;flex-direction:column;gap:.75rem;overflow-y:auto;max-height:50vh;padding-right:.25rem}
+    .cart-item{display:flex;justify-content:space-between;gap:.75rem;padding:.75rem;border:1px solid var(--grid-border);border-radius:.75rem;background:var(--chip-bg)}
+    .cart-item__info{flex:1 1 auto}
+    .cart-item__info strong{display:block;font-weight:800;color:var(--green-dark);margin-bottom:.35rem}
+    .cart-item__meta{font-size:.85rem;color:var(--muted)}
+    .cart-remove{border:none;background:transparent;color:var(--busy);font-weight:900;font-size:1.1rem;cursor:pointer;line-height:1;padding:.15rem}
+    .cart-empty{color:var(--muted);font-size:.95rem;text-align:center;padding:1rem 0}
+    .cart-footer{display:flex;justify-content:space-between;align-items:center;width:100%;gap:.75rem}
+    .cart-summary{font-size:.95rem;color:var(--muted)}
+    .payment-body{display:flex;flex-direction:column;gap:1.25rem;background:#fff}
+    .payment-layout{display:grid;grid-template-columns: minmax(0,1fr) minmax(0,1.2fr);gap:1.5rem;align-items:flex-start}
+    @media(max-width:900px){.payment-layout{grid-template-columns:1fr;}}
+    .payment-panel{background:var(--chip);border:1px solid var(--grid-border);border-radius:var(--radius-lg);padding:1.25rem;box-shadow:0 6px 16px rgba(32,64,41,.08)}
+    .payment-panel__title{font-size:1rem;font-weight:800;color:var(--green-dark);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em}
+    .payment-panel__line{display:flex;justify-content:space-between;font-size:.95rem;margin:.35rem 0;color:var(--muted)}
+    .payment-panel__line strong{color:var(--green-dark)}
+    .payment-panel__items{margin-top:.75rem;display:flex;flex-direction:column;gap:.45rem}
+    .payment-panel__chip{display:flex;flex-direction:column;gap:.35rem;padding:.6rem .85rem;border-radius:.85rem;background:#fff;border:1px solid rgba(32,64,41,.12);font-size:.9rem;box-shadow:0 4px 12px rgba(32,64,41,.08)}
+    .payment-panel__chip span{display:block;font-weight:700;color:var(--green-dark);font-size:.92rem}
+    .payment-panel__meta{font-size:.78rem;color:var(--muted);line-height:1.3}
+    .payment-form{display:flex;flex-direction:column;gap:1rem}
+    .payment-fieldset{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.85rem}
+    .field{display:flex;flex-direction:column;gap:.35rem}
+    .field label{font-weight:700;font-size:.85rem;color:var(--green-dark);text-transform:uppercase;letter-spacing:.06em}
+    .field input, .field select{height:2.7rem;padding:.55rem .75rem;border-radius:.75rem;border:1.5px solid var(--grid-border);background:#fff;font-size:.95rem;transition:.2s ease;border-color:color-mix(in srgb, var(--grid-border) 92%, #fff 8%)}
+    .field input:focus,.field select:focus{outline:none;border-color:color-mix(in srgb, var(--green) 55%, transparent);box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 15%, transparent)}
+    #cardElementWrapper{
+      display:none;
+      border:1.5px solid var(--grid-border);
+      border-radius:.85rem;
+      padding:.6rem .7rem;
+      background:#fff;
+      box-shadow:inset 0 1px 4px rgba(32,64,41,.08);
+      min-height:56px;
+      align-items:center;
+    }
+    #cardElementWrapper.is-visible{display:flex;}
+    .stripe-card-element{width:100%;}
+    .payment-meta{display:flex;justify-content:space-between;align-items:center;font-size:.85rem;color:var(--muted);flex-wrap:wrap;gap:.65rem}
+    .payment-meta__secure{display:flex;align-items:center;gap:.35rem;font-weight:600}
+    .payment-meta__logos{display:flex;gap:.4rem;flex-wrap:wrap}
+    .payment-meta__chip{padding:.25rem .55rem;border-radius:.6rem;background:rgba(32,64,41,.08);font-size:.72rem;font-weight:700;color:var(--green-dark);letter-spacing:.08em;text-transform:uppercase;display:flex;align-items:center;justify-content:center}
+    .payment-badges{display:flex;gap:.4rem;margin-top:.75rem;flex-wrap:wrap}
+    .payment-badge{height:24px;border-radius:6px;background:rgba(32,64,41,.08);padding:.2rem .55rem;font-size:.7rem;font-weight:700;color:var(--green-dark);letter-spacing:.08em;text-transform:uppercase;display:flex;align-items:center;justify-content:center}
+    .status, #paymentMessage{font-size:.92rem;color:var(--muted);line-height:1.45}
+    .payment-status--error{color:#d6453d}
+    .payment-status--success{color:var(--green)}
+    .payment-status--info{color:var(--muted)}
+    .hint{font-size:.85rem;color:var(--muted)}
+    .error{color:#b00020;font-size:.9rem;margin-top:.5rem}
+    .success{color:#0a7a3b;font-size:.95rem;margin-top:.5rem}
+    .skeleton{background:linear-gradient(90deg,#eee,#f6f6f6,#eee);background-size:200% 100%;animation:sh 1.2s ease-in-out infinite;border-radius:.5rem;height:36px}
+    @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+    /* =========================
+       Outlook grid
+       ========================= */
+    .outlook{display:flex;flex-direction:column;min-height:0;border:1px solid var(--grid-border);border-radius:var(--radius-md);overflow:visible;background:#fff;margin-top:.45rem}
+    .outlook__toolbar{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.55rem .75rem;border-bottom:1px solid var(--grid-border)}
+    .outlook__toolbar .controls{display:flex;gap:.4rem}
+    .outlook__toolbar .range{font-weight:900;color:var(--green-dark)}
+    .outlook__toolbar button{border:1px solid var(--grid-border);background:#fff;border-radius:.5rem;padding:.35rem .65rem;cursor:pointer;line-height:1; font-weight:700}
+
+    .outlook__wrap{
+      flex:1 1 auto;
+      overflow-x: scroll; overflow-y: auto;
+      max-height:56vh; min-height:300px; max-width:100%;
+      padding-bottom:10px;
+      scrollbar-gutter:stable both-edges; -webkit-overflow-scrolling:touch;
+    }
+    .outlook__grid{
+      display:grid; min-width:calc(96px + (var(--days,14) * 160px) + 1px);
+      grid-auto-rows:minmax(36px, auto);
+      grid-template-columns: 96px repeat(var(--days, 14), 160px);
+      font-family:var(--font-ui);
+    }
+    .outlook__cell{border-bottom:1px solid var(--grid-border); border-right:1px solid var(--grid-border); padding:.25rem .4rem; background:#fff; white-space:nowrap; text-overflow:ellipsis}
+    .outlook__cell.time{position:sticky;left:0;background:#fff;z-index:2;font-size:.85rem;color:#666}
+    .outlook__head{position:sticky;top:0;background:#fff;z-index:3;border-bottom:2px solid var(--grid-border);box-shadow:0 1px 0 rgba(0,0,0,.04); padding:.4rem .45rem}
+    .outlook__head.day--selected{box-shadow:0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent);border-bottom-color:color-mix(in srgb, var(--gold) 55%, transparent);}
+    .day-head{display:flex;flex-direction:column}
+    .day-title{font:800 .92rem/1.1 var(--font-heading); color:var(--green-dark); text-transform:capitalize}
+    .day-sub{font-size:.75rem;color:#666;margin-top:.15rem}
+    .day--today{background:var(--today-bg)}
+
+    .slot-chip{
+      display:inline-flex;align-items:center;justify-content:center;
+      height:1.7rem; min-width:3.6rem; padding:0 .5rem; border-radius:.5rem;
+      border:1.6px solid transparent; font-weight:900; font-size:.9rem; user-select:none; line-height:1;
+      font-family:var(--font-heading);
+    }
+    .slot-free{color:var(--free);border-color:color-mix(in srgb, var(--free) 55%, #fff);background:var(--chip-bg);cursor:pointer}
+    .slot-free:hover{filter:brightness(.98)}
+    .slot-busy{color:#fff;background:var(--busy);opacity:.92}
+    .slot-selected{background:var(--free)!important;color:#fff;border-color:var(--free)!important;box-shadow:0 0 0 2px color-mix(in srgb, var(--free) 20%, transparent)}
+
+    .legend{display:flex;gap:.75rem;margin-top:.5rem;font-size:.85rem;color:#666}
+    .legend > span{display:inline-flex;align-items:center;gap:.35rem}
+    .legend i{display:inline-block;width:14px;height:14px;border-radius:4px}
+    .legend .lg-free i{background:var(--chip-bg);border:2px solid color-mix(in srgb, var(--free) 60%, #fff)}
+    .legend .lg-busy i{background:var(--busy)}
+
+    .book-mobile{display:none;margin-top:.75rem;border:1px solid #DAD3C1;border-radius:1rem;padding:1rem;background:#fff;box-shadow:0 16px 30px rgba(32,64,41,.12)}
+    .book-mobile__date{display:flex;flex-direction:column;gap:.45rem}
+    .book-mobile__date label{font-size:.82rem;font-weight:700;color:#204029;text-transform:uppercase;letter-spacing:.06em}
+    .book-mobile__date input{height:2.65rem;border:1px solid #DAD3C1;border-radius:.65rem;padding:0 .75rem;font:600 .95rem/1 var(--font-ui);color:#204029;background:#fff}
+    .book-mobile__date input:focus{outline:2px solid color-mix(in srgb, var(--green) 45%, transparent);outline-offset:2px}
+    .book-mobile__times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;margin-top:1rem;max-height:min(44vh,320px);overflow-y:auto;padding-right:.35rem;margin-right:-.35rem;scrollbar-width:thin;-webkit-overflow-scrolling:touch}
+    .book-mobile__times::-webkit-scrollbar{width:6px}
+    .book-mobile__times::-webkit-scrollbar-thumb{background:rgba(32,64,41,.25);border-radius:999px}
+    .book-mobile__time{padding:.7rem .8rem;border-radius:.75rem;border:1.5px solid #DAD3C1;background:#fff;font-weight:700;color:#204029;box-shadow:0 12px 26px rgba(32,64,41,.14);transition:.18s ease;text-align:center}
+    .book-mobile__time:focus-visible{outline:2px solid color-mix(in srgb, var(--gold) 55%, transparent);outline-offset:2px}
+    .book-mobile__time.is-selected{background:#204029;color:#fff;border-color:#204029;box-shadow:0 16px 32px rgba(32,64,41,.26)}
+    .book-mobile__empty{margin-top:1rem;font-size:.85rem;color:#6b7a6f;text-align:center;display:none}
+
+    /* Zoom-proof modal sizes */
+    .modal__dialog{ width:min(940px, calc(100dvw - 2rem)); max-height:calc(100dvh - 2rem); }
+    @supports not (height: 100dvh){
+      .modal__dialog{ width:min(940px, calc(100vw - 2rem)); max-height:calc(100vh - 2rem); }
+    }
+
+    @media (max-width: 900px){
+      .modal__dialog{width:min(96vw, 720px)}
+      .grid-2{grid-template-columns:1fr}
+      .outlook__wrap{max-height:50vh}
+      .modal__dialog--payment .modal__header{padding:1.1rem 1.25rem 0}
+      .modal__dialog--payment .payment-body{padding:0 1.25rem 1.25rem}
+      .modal__dialog--payment .modal__footer{padding:1rem 1.25rem}
+      .payment-fieldset{grid-template-columns:1fr}
+      .book-desktop{display:none}
+      .book-mobile{display:block}
+    }
+
+    @media (max-width: 560px){
+      .book-mobile__times{grid-template-columns:1fr}
+    }
+
+    @media (max-width: 900px){
+      body.nav-open{overflow:hidden;}
+      .container{padding-inline:1.15rem;}
+      .site-header{padding-block:.65rem;}
+      .site-header__inner{gap:.9rem;}
+      .mobile-nav-btn{display:inline-flex;margin-left:auto;}
+      .header-actions{position:fixed;top:0;right:0;bottom:0;width:min(320px,92vw);background:linear-gradient(180deg,#204029 0%,#1b3626 100%);padding:1.75rem 1.5rem 2rem;border-radius:0;transform:translateX(100%);transition:transform .3s ease,opacity .3s ease;opacity:0;display:flex;flex-direction:column;align-items:stretch;gap:1.2rem;box-shadow:-18px 0 35px rgba(0,0,0,.32);z-index:120;margin-left:0;}
+      body.nav-open .header-actions{transform:translateX(0);opacity:1;}
+      .header-actions::before{content:'';width:72px;height:4px;border-radius:999px;background:rgba(255,255,255,.25);align-self:center;margin-bottom:.75rem;}
+      .header-actions .btn{width:100%;justify-content:center;}
+      .header-actions .lang-picker{flex-direction:column;align-items:stretch;gap:.5rem;margin-right:0;color:#fff;}
+      .header-actions .lang-picker__label{opacity:.85;}
+      .header-actions .lang-picker__select{width:100%;background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.35);}
+      .mobile-close{display:inline-flex;align-items:center;gap:.45rem;color:#fff;background:transparent;border:none;font-size:1rem;font-weight:700;justify-content:flex-start;padding:0;}
+      .mobile-nav-backdrop{position:fixed;top:0;bottom:0;left:0;right:0;background:rgba(15,23,17,.45);opacity:0;pointer-events:none;transition:opacity .3s ease;z-index:110;display:none;}
+      body.nav-open .mobile-nav-backdrop{opacity:1;pointer-events:auto;display:block;right:min(320px,92vw);}
+      .hero{padding:4rem 1.25rem 3.4rem;align-items:flex-start;text-align:left;gap:1.2rem;}
+      .hero h1{font-size:clamp(2rem,8vw,2.6rem);} 
+      .hero p{font-size:1rem;max-width:32ch;}
+      .filters{flex-direction:column;align-items:stretch;gap:.85rem;}
+      .filters input,.filters select{width:100%;}
+      .filters .btn{width:100%;justify-content:center;}
+      .services-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:1.1rem;}
+      .service-card{border-radius:1.25rem;padding:1rem .95rem;}
+      .service-card__img{height:160px;}
+      .service-meta{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;}
+      .floating-cart{display:none;position:fixed;right:1.15rem;bottom:1.25rem;background:linear-gradient(135deg,var(--green) 0%,var(--gold) 100%);color:#fff;border:none;border-radius:999px;padding:.75rem 1.15rem;align-items:center;gap:.6rem;box-shadow:0 18px 28px rgba(32,64,41,.25);z-index:105;transition:transform .2s ease,opacity .2s ease;}
+      .floating-cart.floating-cart--visible{display:flex;}
+      .floating-cart__icon{font-size:1.35rem;line-height:1;}
+      .floating-cart__count{min-width:1.9rem;height:1.9rem;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:rgba(255,255,255,.18);font-weight:800;}
+      body.modal-open .floating-cart,
+      body.nav-open .floating-cart{display:none;}
+    }
+
+    @media (max-width: 540px){
+      .hero{padding-top:3.2rem;}
+      .btn{width:100%;justify-content:center;}
+      .services-grid{grid-template-columns:1fr;}
+    }
+  </style>
+</head>
+<body>
+
+  <!-- header -->
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <span class="logo" data-i18n="common.brand">Malva Booking</span>
+      <button type="button" class="mobile-nav-btn" data-menu-toggle aria-label="Open menu" aria-expanded="false">☰</button>
+      <nav class="header-actions" data-menu-drawer>
+        <button type="button" class="mobile-close" data-menu-close aria-label="Close menu">
+          ✕ <span data-i18n="common.close">Close</span>
+        </button>
+        <div class="lang-picker" data-i18n-attr="aria-label:common.language">
+          <label for="langSelect" class="lang-picker__label" data-i18n="common.language">Language</label>
+          <select id="langSelect" class="lang-picker__select" data-lang-switch></select>
+        </div>
+        <button type="button" class="btn btn--primary" id="cartButton">
+          <span data-i18n="services.nav.cart">Cart</span>
+          <span class="cart-bubble" id="cartCount">0</span>
+        </button>
+        {% if user.is_authenticated %}
+          <a href="{% url 'dashboard' %}" class="btn btn--ghost" data-i18n="services.nav.clientProfile">Client Profile</a>
+        {% else %}
+          <a href="{% url 'login' %}?next={{ request.get_full_path|urlencode }}" class="btn btn--ghost" data-i18n="services.nav.login">Login</a>
+        {% endif %}
+      </nav>
+    </div>
+  </header>
+  <div class="mobile-nav-backdrop" data-menu-backdrop></div>
+
+  <!-- hero -->
+  <section class="hero">
+    <h1 data-i18n="services.hero.title">Book your appointment in 2 clicks</h1>
+    <p data-i18n="services.hero.subtitle">Pick a service, a specialist, and a time — we’ll handle the rest.</p>
+    <a href="#services" class="btn btn--primary" data-i18n="services.hero.cta">Browse services ↓</a>
+  </section>
+
+  <main id="services" class="container" style="padding-block:3rem;">
+    <h2 style="font-size:1.75rem;font-weight:800;margin-bottom:1.5rem;color:var(--green);" data-i18n="services.section.title">Services</h2>
+
+    <!-- Filters -->
+    <form method="get" class="filters" role="search">
+      <input type="search" name="q" placeholder="Search a service…" value="{{ q|default:'' }}" data-i18n-attr="placeholder:services.filters.searchPlaceholder">
+      <select name="cat">
+        <option value="" data-i18n="services.filters.allCategories">All categories</option>
+        {% for c in filter_categories %}
+          <option value="{{ c.id }}" {% if active_category == c.id|stringformat:'s' %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn--primary" type="submit" data-i18n="services.filters.submit">Search</button>
+      <a
+        class="btn btn--ghost"
+        data-reset-link
+        href="{% url 'client-dashboard' %}#services"
+        {% if not q and not active_category %}style="display:none;" aria-hidden="true"{% endif %}
+        data-i18n="services.filters.reset"
+      >Reset</a>
+    </form>
+
+    <!-- Live results (JS) -->
+    <h3 id="liveTitle" style="margin:.5rem 0 1rem; display:none;" data-i18n="services.search.liveTitle">Search results</h3>
+    <div id="liveGrid" class="services-grid" style="display:none;"></div>
+
+    <!-- Server-rendered fallback/results -->
+    <div id="serverContent">
+      {% if search_results %}
+        <h3 style="margin:.5rem 0 1rem;" data-i18n="services.search.resultsTitle">Search results</h3>
+        <div class="services-grid">
+          {% for s in search_results %}
+            <article class="service-card">
+              <div class="service-card__img{% if not s.card_image_url %} service-card__img--empty{% endif %}"{% if not s.card_image_url %} aria-hidden="true"{% endif %}>
+                {% if s.card_image_url %}
+                  <img src="{{ s.card_image_url }}" alt="{{ s.card_image_alt }}" loading="lazy">
+                {% else %}
+                  <span data-i18n="services.cards.noImage">Preview coming soon</span>
+                {% endif %}
+              </div>
+              <div class="muted">{{ s.category.name }}</div>
+              <h3 data-service-name-original="{{ s.name|escape }}">{{ s.name }}</h3>
+              {% if s.description %}<p class="muted">{{ s.description|truncatewords:22 }}</p>{% endif %}
+              <div class="service-meta">
+                {% with disc=s.get_active_discount %}
+                  {% if disc %}
+                    <span class="old">${{ s.base_price|floatformat:2 }}</span>
+                    <strong>${{ s.get_discounted_price|floatformat:2 }}</strong>
+                    <span class="badge">-{{ disc.discount_percent }}%</span>
+                  {% else %}
+                    <strong>${{ s.base_price|floatformat:2 }}</strong>
+                  {% endif %}
+                {% endwith %}
+                <span aria-hidden="true">·</span>
+                <span class="meta-duration" data-i18n="services.units.minutes" data-i18n-vars='{"value":"{{ s.duration_min }}"}'>{{ s.duration_min }} min</span>
+              </div>
+              <button class="btn btn--primary book-btn" data-service-id="{{ s.id }}" data-service-name="{{ s.name }}" data-i18n="services.cards.addToCart">Add to cart</button>
+            </article>
+          {% empty %}
+            <div class="stub" data-i18n="services.search.noServerResults" data-i18n-vars='{"query":"{{ q|escapejs }}"}'>No results for “{{ q }}”.</div>
+          {% endfor %}
+        </div>
+        <hr style="margin:2rem 0;border:none;border-top:1px solid var(--lgray)">
+      {% endif %}
+
+      {% for c in categories %}
+        <h3 style="margin:1.5rem 0 .75rem;color:var(--green);font-weight:800">{{ c.name }}</h3>
+        <div class="services-grid">
+          {% for s in c.service_set.all %}
+            <article class="service-card">
+              <div class="service-card__img{% if not s.card_image_url %} service-card__img--empty{% endif %}"{% if not s.card_image_url %} aria-hidden="true"{% endif %}>
+                {% if s.card_image_url %}
+                  <img src="{{ s.card_image_url }}" alt="{{ s.card_image_alt }}" loading="lazy">
+                {% else %}
+                  <span data-i18n="services.cards.noImage">Preview coming soon</span>
+                {% endif %}
+              </div>
+              <h3 data-service-name-original="{{ s.name|escape }}">{{ s.name }}</h3>
+              {% if s.description %}<p class="muted">{{ s.description|truncatewords:22 }}</p>{% endif %}
+              <div class="service-meta">
+                {% with disc=s.get_active_discount %}
+                  {% if disc %}
+                    <span class="old">${{ s.base_price|floatformat:2 }}</span>
+                    <strong>${{ s.get_discounted_price|floatformat:2 }}</strong>
+                    <span class="badge">-{{ disc.discount_percent }}%</span>
+                  {% else %}
+                    <strong>${{ s.base_price|floatformat:2 }}</strong>
+                  {% endif %}
+                {% endwith %}
+                <span aria-hidden="true">·</span>
+                <span class="meta-duration" data-i18n="services.units.minutes" data-i18n-vars='{"value":"{{ s.duration_min }}"}'>{{ s.duration_min }} min</span>
+              </div>
+              <button class="btn btn--primary book-btn" data-service-id="{{ s.id }}" data-service-name="{{ s.name }}" data-i18n="services.cards.addToCart">Add to cart</button>
+            </article>
+          {% empty %}
+            <div class="stub" data-i18n="services.search.noCategory">No services in this category yet.</div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+
+      {% if uncategorized %}
+        <h3 style="margin:1.5rem 0 .75rem;color:var(--green);font-weight:800" data-i18n="services.search.uncategorized">Uncategorized</h3>
+        <div class="services-grid">
+          {% for s in uncategorized %}
+            <article class="service-card">
+              <div class="service-card__img{% if not s.card_image_url %} service-card__img--empty{% endif %}"{% if not s.card_image_url %} aria-hidden="true"{% endif %}>
+                {% if s.card_image_url %}
+                  <img src="{{ s.card_image_url }}" alt="{{ s.card_image_alt }}" loading="lazy">
+                {% else %}
+                  <span data-i18n="services.cards.noImage">Preview coming soon</span>
+                {% endif %}
+              </div>
+              <h3 data-service-name-original="{{ s.name|escape }}">{{ s.name }}</h3>
+              {% if s.description %}<p class="muted">{{ s.description|truncatewords:22 }}</p>{% endif %}
+              <div class="service-meta">
+                {% with disc=s.get_active_discount %}
+                  {% if disc %}
+                    <span class="old">${{ s.base_price|floatformat:2 }}</span>
+                    <strong>${{ s.get_discounted_price|floatformat:2 }}</strong>
+                    <span class="badge">-{{ disc.discount_percent }}%</span>
+                  {% else %}
+                    <strong>${{ s.base_price|floatformat:2 }}</strong>
+                  {% endif %}
+                {% endwith %}
+                <span aria-hidden="true">·</span>
+                <span class="meta-duration" data-i18n="services.units.minutes" data-i18n-vars='{"value":"{{ s.duration_min }}"}'>{{ s.duration_min }} min</span>
+              </div>
+              <button class="btn btn--primary book-btn" data-service-id="{{ s.id }}" data-service-name="{{ s.name }}" data-i18n="services.cards.addToCart">Add to cart</button>
+            </article>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if not has_any_services %}
+        <div class="stub" data-i18n="services.search.emptyCatalogue">The catalog will be available soon 👍</div>
+      {% endif %}
+    </div>
+  </main>
+
+  <button type="button" class="floating-cart" id="floatingCart" aria-label="Open cart">
+    <span class="floating-cart__icon" aria-hidden="true">🛒</span>
+    <span class="floating-cart__count" id="floatingCartCount">0</span>
+  </button>
+
+  <footer class="site-footer" data-i18n="services.footer.copy">© 2025 Malva Booking</footer>
+
+  <!-- ===== Modal: booking ===== -->
+  <div class="modal" id="bookModal" aria-hidden="true">
+    <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="bookTitle">
+      <div class="modal__header">
+        <div class="modal__title" id="bookTitle">
+          <span data-i18n="services.modal.title">Add service:</span>
+          <span id="bookServiceName"></span>
+        </div>
+        <button class="modal__close" id="bookClose" aria-label="Close" data-i18n-attr="aria-label:common.close">×</button>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <!-- Master -->
+          <div class="field">
+            <label for="bookMaster" data-i18n="services.modal.masterLabel">Master</label>
+            <select id="bookMaster"></select>
+          </div>
+
+          <!-- Outlook grid -->
+          <div class="field" style="margin-top:.5rem">
+            <label data-i18n="services.modal.chooseTime">Choose time</label>
+
+            <div class="book-mobile" id="bookMobile" aria-live="polite">
+              <div class="book-mobile__date">
+                <label for="bookMobileDate" data-i18n="services.modal.mobileDate">Date</label>
+                <input type="date" id="bookMobileDate" name="bookMobileDate">
+              </div>
+              <div class="book-mobile__times" id="bookMobileTimes"></div>
+              <div class="book-mobile__empty" id="bookMobileEmpty">No availability yet.</div>
+            </div>
+
+            <div class="outlook book-desktop" id="ol">
+              <div class="outlook__toolbar">
+                <div class="controls">
+                  <button id="olPrev" type="button" data-i18n="services.modal.prev">← Prev</button>
+                  <button id="olToday" type="button" data-i18n="services.modal.today">Today</button>
+                  <button id="olNext" type="button" data-i18n="services.modal.next">Next →</button>
+                </div>
+                <div class="range" id="olRange">—</div>
+              </div>
+              <div class="outlook__wrap" id="olWrap">
+                <div class="outlook__grid" id="olGrid" tabindex="0" aria-live="polite"></div>
+              </div>
+            </div>
+
+            <div class="legend book-desktop">
+              <span class="lg-free"><i></i> <span data-i18n="common.free">free</span></span>
+              <span class="lg-busy"><i></i> <span data-i18n="common.busy">busy</span></span>
+            </div>
+            <div class="hint book-desktop" data-i18n="services.modal.legendHint">Прокручивайте горизонтально. Красные слоты показаны как занятые и не кликаются.</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="field">
+            <label data-i18n="services.modal.summaryLabel">Summary</label>
+            <div class="muted" id="bookSummary" data-i18n="services.modal.summaryPlaceholder">Pick a master and time.</div>
+          </div>
+          <div class="error" id="bookError" style="display:none;"></div>
+          <div class="success" id="bookSuccess" style="display:none;"></div>
+        </div>
+      </div>
+
+      <div class="modal__footer">
+        <button class="btn btn--ghost" id="bookCancel" data-i18n="common.cancel">Cancel</button>
+        <button class="btn btn--primary" id="bookSubmit" disabled data-i18n="common.addToCart">Add to cart</button>
+      </div>
+  </div>
+</div>
+
+  <!-- ===== Modal: cart ===== -->
+  <div class="modal" id="cartModal" aria-hidden="true">
+    <div class="modal__dialog modal__dialog--narrow" role="dialog" aria-modal="true" aria-labelledby="cartTitle">
+      <div class="modal__header">
+        <div class="modal__title" id="cartTitle" data-i18n="services.cart.title">Cart</div>
+        <button class="modal__close" id="cartClose" aria-label="Close" data-i18n-attr="aria-label:common.close">×</button>
+      </div>
+      <div class="cart-list" id="cartItems"></div>
+      <div class="cart-empty" id="cartEmpty" data-i18n="services.cart.empty">Your cart is empty.</div>
+      <div class="error" id="cartError" style="display:none;"></div>
+      <div class="success" id="cartSuccess" style="display:none;"></div>
+      <div class="modal__footer cart-footer">
+        <div class="cart-summary" id="cartSummary" data-i18n="services.cart.summary" data-i18n-vars='{"total":"$0","duration":"0 min"}'>Total: $0 · 0 min</div>
+        <button class="btn btn--primary" id="cartCheckout" disabled data-i18n="services.cart.checkout">Checkout</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Modal: payment ===== -->
+  <div class="modal" id="paymentModal" aria-hidden="true">
+    <div class="modal__dialog modal__dialog--payment" role="dialog" aria-modal="true" aria-labelledby="paymentTitle">
+      <div class="modal__header">
+        <div class="modal__title" id="paymentTitle">Secure payment</div>
+        <button class="modal__close" id="paymentClose" aria-label="Close">×</button>
+      </div>
+      <div class="payment-body" id="paymentBody">
+        <div class="payment-layout">
+          <aside class="payment-panel" id="paymentSummaryPanel">
+            <div class="payment-panel__title">Order summary</div>
+            <div class="payment-panel__line"><span>Amount due</span><strong id="paymentSummaryAmount">$0.00</strong></div>
+            <div class="payment-panel__line"><span>Appointment</span><strong id="paymentSummaryTime">—</strong></div>
+            <div class="payment-panel__items" id="paymentSummaryItems"></div>
+            <div class="payment-badges">
+              <div class="payment-badge">SSL Secure</div>
+              <div class="payment-badge">PCI-DSS</div>
+              <div class="payment-badge">Stripe</div>
+            </div>
+          </aside>
+          <form class="payment-form" id="paymentForm" novalidate>
+            <p id="paymentSummary" class="text-base font-medium text-[#204029]">Complete your payment of $0.</p>
+            <div class="payment-fieldset">
+              <div class="field">
+                <label for="paymentName">Cardholder name</label>
+                <input type="text" id="paymentName" autocomplete="name" placeholder="Jane Doe" required>
+              </div>
+              <div class="field">
+                <label for="paymentEmail">Email receipt</label>
+                <input type="email" id="paymentEmail" autocomplete="email" placeholder="you@example.com" required>
+              </div>
+            </div>
+            <div class="field">
+              <label for="cardElement">Card details</label>
+              <div id="cardElementWrapper">
+                <div id="cardElement" class="stripe-card-element"></div>
+              </div>
+            </div>
+            <div class="payment-fieldset">
+              <div class="field">
+                <label for="paymentAddress1">Billing address</label>
+                <input type="text" id="paymentAddress1" autocomplete="address-line1" placeholder="123 Main Street" required>
+              </div>
+              <div class="field">
+                <label for="paymentAddress2">Apartment/Suite (optional)</label>
+                <input type="text" id="paymentAddress2" autocomplete="address-line2" placeholder="Unit 4B">
+              </div>
+            </div>
+            <div class="payment-fieldset">
+              <div class="field">
+                <label for="paymentCity">City</label>
+                <input type="text" id="paymentCity" autocomplete="address-level2" placeholder="Calgary" required>
+              </div>
+              <div class="field">
+                <label for="paymentState">Province / State</label>
+                <input type="text" id="paymentState" autocomplete="address-level1" placeholder="Alberta" required>
+              </div>
+            </div>
+            <div class="payment-fieldset">
+              <div class="field">
+                <label for="paymentPostal">Postal / ZIP code</label>
+                <input type="text" id="paymentPostal" autocomplete="postal-code" placeholder="T2X 1A1" required>
+              </div>
+              <div class="field">
+                <label for="paymentCountry">Country</label>
+                <select id="paymentCountry" autocomplete="country" required>
+                  <option value="" disabled selected>Select country</option>
+                  <option value="CA">Canada</option>
+                  <option value="US">United States</option>
+                </select>
+              </div>
+            </div>
+            <div class="payment-meta">
+              <div class="payment-meta__secure">🔒 Encrypted by Stripe</div>
+              <div class="payment-meta__logos">
+                <div class="payment-meta__chip">Visa</div>
+                <div class="payment-meta__chip">Mastercard</div>
+                <div class="payment-meta__chip">Amex</div>
+                <div class="payment-meta__chip">Apple Pay</div>
+              </div>
+            </div>
+            <div class="status" id="paymentMessage" style="display:none;"></div>
+          </form>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button class="btn btn--primary" id="paymentConfirm">Pay now</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const I18N = window.MalvaI18n;
+      let refreshPending = false;
+      const queueRefresh = () => {
+        if (!I18N || typeof I18N.refresh !== 'function' || refreshPending) {
+          return;
+        }
+        refreshPending = true;
+        window.requestAnimationFrame(() => {
+          refreshPending = false;
+          I18N.refresh({ silent: true });
+        });
+      };
+      const translate = (key, vars, fallback) => {
+        if (!key) return fallback || '';
+        if (I18N) {
+          try {
+            return I18N.t(key, vars);
+          } catch (err) {
+            return fallback !== undefined ? fallback : key;
+          }
+        }
+        return fallback !== undefined ? fallback : key;
+      };
+      const stripePublicKey = "{{ stripe_public_key|default:''|escapejs }}";
+      let stripeClient = null;
+      let stripeElements = null;
+      let stripeCardElement = null;
+      let stripeCardComplete = false;
+      let currentPaymentContext = null;
+      const PAYMENT_COPY = {
+        title: 'Secure payment',
+        summary: (amount) => `Complete your payment of ${amount}.`,
+        missingKey: 'Payments are temporarily unavailable.',
+        noCharge: (amount) => `No payment needed (${amount}).`,
+        offline: (amount) => `Payments are currently handled offline. Click "Confirm booking" to finish.`,
+        enterCard: 'Enter your card details to finish.',
+        processing: 'Processing payment…',
+        verifyFailed: 'Unable to verify payment.',
+        failedGeneric: 'Payment did not complete. Please try again.',
+        failedShort: 'Payment failed.',
+        success: 'Payment confirmed! Redirecting…',
+      };
+      const setTextKey = (el, key, vars, fallback) => {
+        if (!el) return;
+
+        const resolved = key
+          ? translate(key, vars, fallback !== undefined ? fallback : el.textContent)
+          : fallback;
+        if (resolved !== undefined && resolved !== null) {
+          el.textContent = resolved;
+        }
+
+        if (I18N && key) {
+          el.setAttribute('data-i18n', key);
+          if (vars) {
+            el.setAttribute('data-i18n-vars', JSON.stringify(vars));
+          } else {
+            el.removeAttribute('data-i18n-vars');
+          }
+          queueRefresh();
+        } else if (!key) {
+          el.removeAttribute('data-i18n');
+          el.removeAttribute('data-i18n-vars');
+        }
+      };
+      const clearTextKey = (el) => {
+        if (!el) return;
+        el.removeAttribute('data-i18n');
+        el.removeAttribute('data-i18n-vars');
+      };
+      const formatMinutes = (minutes) => translate('services.units.minutes', { value: String(minutes) }, `${minutes} min`);
+      const getLocale = () => (I18N && typeof I18N.getLocale === 'function'
+        ? I18N.getLocale()
+        : (navigator.languages && navigator.languages[0]) || navigator.language || 'en');
+      const translateServiceNameText = (name) => {
+        if (!name) return '';
+        if (I18N && typeof I18N.translateServiceName === 'function') {
+          return I18N.translateServiceName(name);
+        }
+        return name;
+      };
+      const applyServiceNameTranslations = (root) => {
+        const scope = root || document;
+        scope.querySelectorAll('[data-service-name-original]').forEach((el) => {
+          const original = el.getAttribute('data-service-name-original') || el.textContent;
+          if (!original) return;
+          el.textContent = translateServiceNameText(original) || original;
+        });
+      };
+
+      const menuToggle = document.querySelector('[data-menu-toggle]');
+      const menuClose = document.querySelector('[data-menu-close]');
+      const menuDrawer = document.querySelector('[data-menu-drawer]');
+      const menuBackdrop = document.querySelector('[data-menu-backdrop]');
+
+      const openMenuDrawer = () => {
+        document.body.classList.add('nav-open');
+        menuToggle?.setAttribute('aria-expanded', 'true');
+      };
+      const closeMenuDrawer = () => {
+        document.body.classList.remove('nav-open');
+        menuToggle?.setAttribute('aria-expanded', 'false');
+      };
+
+      menuToggle?.addEventListener('click', () => {
+        if (document.body.classList.contains('nav-open')) {
+          closeMenuDrawer();
+        } else {
+          openMenuDrawer();
+        }
+      });
+      menuClose?.addEventListener('click', closeMenuDrawer);
+      menuBackdrop?.addEventListener('click', closeMenuDrawer);
+      menuDrawer?.addEventListener('click', (event) => {
+        if (window.innerWidth <= 900 && event.target.closest('a')) {
+          closeMenuDrawer();
+          return;
+        }
+        event.stopPropagation();
+      });
+      window.addEventListener('resize', () => {
+        if (window.innerWidth > 900) closeMenuDrawer();
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeMenuDrawer();
+      });
+
+      const isAuth  = {{ user.is_authenticated|yesno:"true,false" }};
+      const loginUrl= "{% url 'login' %}?next={{ request.path }}";
+      const apiAvail= "/accounts/api/availability/";
+      const apiCart = "/accounts/api/cart/";
+      const apiCartAdd = "/accounts/api/cart/add/";
+      const apiCartCheckout = "/accounts/api/cart/checkout/";
+      const cartRemoveUrl = (id)=>`/accounts/api/cart/${id}/remove/`;
+      const paymentVerifyUrl = (id)=>`/accounts/api/appointment/${id}/payments/verify/`;
+
+      // ===== helpers =====
+      function getCookie(name){ const m=document.cookie.match('(^|;)\\s*'+name+'\\s*=\\s*([^;]+)'); return m?m.pop():''; }
+      function ymd(d){ const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${d.getFullYear()}-${m}-${day}`; }
+      function parseISO(iso){ try{return new Date(iso);}catch(_){return null;} }
+      function fmtHM(d){ return d.toLocaleTimeString(getLocale(), {hour:'numeric', minute:'2-digit'}); }
+      function fmtTime(iso){ try { return new Date(iso).toLocaleTimeString(getLocale(), {hour:'2-digit', minute:'2-digit'}); } catch(e){ return iso; } }
+
+      // ===== modal nodes =====
+      const modal=document.getElementById('bookModal');
+      const btnClose=document.getElementById('bookClose');
+      const btnCancel=document.getElementById('bookCancel');
+      const btnSubmit=document.getElementById('bookSubmit');
+      const elServiceName=document.getElementById('bookServiceName');
+      const elMaster=document.getElementById('bookMaster');
+      const elSummary=document.getElementById('bookSummary');
+      const elError=document.getElementById('bookError');
+      const elSuccess=document.getElementById('bookSuccess');
+      const cartBtn=document.getElementById('cartButton');
+      const cartModal=document.getElementById('cartModal');
+      const cartClose=document.getElementById('cartClose');
+      const cartItems=document.getElementById('cartItems');
+      const cartEmpty=document.getElementById('cartEmpty');
+      const cartError=document.getElementById('cartError');
+      const cartSuccess=document.getElementById('cartSuccess');
+      const cartSummary=document.getElementById('cartSummary');
+      const cartCheckout=document.getElementById('cartCheckout');
+      const cartCount=document.getElementById('cartCount');
+      const floatingCartBtn=document.getElementById('floatingCart');
+      const floatingCartCount=document.getElementById('floatingCartCount');
+      const paymentModal=document.getElementById('paymentModal');
+      const paymentClose=document.getElementById('paymentClose');
+      const paymentConfirm=document.getElementById('paymentConfirm');
+      const paymentSummary=document.getElementById('paymentSummary');
+      const paymentTitle=document.getElementById('paymentTitle');
+      const paymentCardLabel=document.querySelector('label[for="cardElement"]');
+      const cardElementWrapper=document.getElementById('cardElementWrapper');
+      const cardElementTarget=document.getElementById('cardElement');
+      const paymentForm=document.getElementById('paymentForm');
+      const paymentSummaryAmount=document.getElementById('paymentSummaryAmount');
+      const paymentSummaryTime=document.getElementById('paymentSummaryTime');
+      const paymentSummaryItems=document.getElementById('paymentSummaryItems');
+      const paymentMessage=document.getElementById('paymentMessage');
+      const inputName=document.getElementById('paymentName');
+      const inputEmail=document.getElementById('paymentEmail');
+      const inputAddress1=document.getElementById('paymentAddress1');
+      const inputAddress2=document.getElementById('paymentAddress2');
+      const inputCity=document.getElementById('paymentCity');
+      const inputState=document.getElementById('paymentState');
+      const inputPostal=document.getElementById('paymentPostal');
+      const inputCountry=document.getElementById('paymentCountry');
+
+      const BODY_MODAL_CLASS = 'modal-open';
+
+      function openModalElement(el){
+        if(!el) return;
+        el.classList.add('modal--open');
+        document.body.classList.add(BODY_MODAL_CLASS);
+      }
+
+      function closeModalElement(el){
+        if(!el) return;
+        el.classList.remove('modal--open');
+        if(!document.querySelector('.modal.modal--open')){
+          document.body.classList.remove(BODY_MODAL_CLASS);
+        }
+      }
+
+      if(floatingCartBtn){
+        floatingCartBtn.setAttribute('aria-hidden','true');
+        floatingCartBtn.tabIndex = -1;
+      }
+
+      let summaryState = { key: 'services.modal.summaryPlaceholder', vars: null };
+      let cartState = { items: [], count: 0, total_price: '0', total_duration_min: 0 };
+
+      function fmtDateTime(iso){
+        try{
+          const d=new Date(iso);
+          return `${d.toLocaleDateString(getLocale())} ${d.toLocaleTimeString(getLocale(), {hour:'2-digit', minute:'2-digit'})}`;
+        }catch(_){
+          return iso;
+        }
+      }
+
+      function formatCurrency(amount, currency){
+        try{
+          return new Intl.NumberFormat(getLocale(), {style:'currency', currency:(currency||'CAD').toUpperCase()}).format(Number(amount||0));
+        }catch(_){
+          return `${(currency||'CAD').toUpperCase()} ${amount}`;
+        }
+      }
+
+      function resetPaymentForm(){
+        if (paymentForm) {
+          paymentForm.reset();
+        }
+        if (paymentConfirm) {
+          paymentConfirm.onclick = null;
+        }
+        stripeCardComplete = false;
+        if (stripeCardElement) {
+          stripeCardElement.clear();
+        }
+        cardElementWrapper?.classList.remove('is-visible');
+        if (inputCountry) {
+          const defaultOption = Array.from(inputCountry.options).find(opt => opt.value === 'CA');
+          inputCountry.value = defaultOption ? 'CA' : (inputCountry.options[0]?.value || '');
+        }
+        setPaymentMessage(null);
+        setConfirmLoading(false);
+      }
+
+      function normalizePostal(value){
+        const raw = (value || '').toUpperCase().replace(/\s+/g, '');
+        if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(raw)){
+          return raw.replace(/(.{3})(?=.)/, '$1 ');
+        }
+        return raw;
+      }
+
+      const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+      function gatherBillingDetails(){
+        const name = (inputName?.value || '').trim();
+        const email = (inputEmail?.value || '').trim();
+        const line1 = (inputAddress1?.value || '').trim();
+        const line2 = (inputAddress2?.value || '').trim();
+        const city = (inputCity?.value || '').trim();
+        const state = (inputState?.value || '').trim();
+        const postal = normalizePostal(inputPostal?.value || '');
+        const country = (inputCountry?.value || '').trim();
+        return {
+          name,
+          email,
+          address: {
+            line1,
+            line2: line2 || undefined,
+            city,
+            state,
+            postal_code: postal,
+            country,
+          },
+        };
+      }
+
+      function checkPaymentForm(){
+        if (!paymentConfirm) return;
+        const details = gatherBillingDetails();
+        const requiresCard = Boolean(currentPaymentContext?.payment?.client_secret);
+        if (!requiresCard){
+          paymentConfirm.disabled = false;
+          return;
+        }
+        const requiredFilled = [
+          details.name,
+          details.email && emailRegex.test(details.email),
+          details.address.line1,
+          details.address.city,
+          details.address.state,
+          details.address.postal_code,
+          details.address.country,
+        ].every(Boolean);
+        const cardReady = requiresCard ? stripeCardComplete : true;
+        const ready = requiredFilled && cardReady;
+        paymentConfirm.disabled = !ready;
+      }
+
+      function setConfirmLoading(loading){
+        if (!paymentConfirm) return;
+        if (loading){
+          paymentConfirm.classList.add('btn--loading');
+          paymentConfirm.textContent = 'Processing…';
+          paymentConfirm.disabled = true;
+        } else {
+          paymentConfirm.classList.remove('btn--loading');
+          const needsCard = currentPaymentContext ? Boolean(currentPaymentContext?.payment?.client_secret) : true;
+          paymentConfirm.textContent = needsCard ? 'Pay now' : 'Close';
+          checkPaymentForm();
+        }
+      }
+
+      function setCartMessage(kind, key, vars, fallback){
+        if (cartError) {
+          cartError.style.display = 'none';
+          cartError.textContent = '';
+          clearTextKey(cartError);
+        }
+        if (cartSuccess) {
+          cartSuccess.style.display = 'none';
+          cartSuccess.textContent = '';
+          clearTextKey(cartSuccess);
+        }
+        if (!kind) return;
+        const target = kind === 'error' ? cartError : cartSuccess;
+        if (!target) return;
+        target.style.display = 'block';
+        if (key) {
+          setTextKey(target, key, vars, fallback);
+        } else if (fallback !== undefined) {
+          target.textContent = fallback;
+        }
+      }
+
+      function setPaymentMessage(kind, message){
+        if (!paymentMessage) return;
+        paymentMessage.style.display = message ? 'block' : 'none';
+        paymentMessage.textContent = message || '';
+        paymentMessage.classList.remove('payment-status--error', 'payment-status--success', 'payment-status--info');
+        if (!message) return;
+        const map = {
+          error: 'payment-status--error',
+          success: 'payment-status--success',
+          status: 'payment-status--info',
+        };
+        const cls = map[kind] || map.status;
+        paymentMessage.classList.add(cls);
+      }
+
+      function ensureStripe(){
+        if (!stripePublicKey) return null;
+        if (!window.Stripe) return null;
+        if (!stripeClient){
+          stripeClient = window.Stripe(stripePublicKey);
+          stripeElements = stripeClient.elements({
+            appearance: {
+              theme: 'flat',
+              variables: {
+                colorText: '#204029',
+                colorPrimary: '#AF9525',
+                fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                borderRadius: '12px',
+              },
+            },
+          });
+        }
+        if (!stripeCardElement && cardElementTarget){
+          stripeCardElement = stripeElements.create('card', {
+            style: {
+              base: {
+                color: '#204029',
+                fontFamily: 'Inter, "Segoe UI", sans-serif',
+                fontSize: '16px',
+                '::placeholder': { color: 'rgba(77,77,77,.55)' },
+                iconColor: '#AF9525',
+              },
+              invalid: { color: '#d6453d' },
+            },
+          });
+          stripeCardElement.mount('#cardElement');
+          stripeCardElement.on('change', (event) => {
+            stripeCardComplete = Boolean(event.complete);
+            if (event.error) {
+              setPaymentMessage('error', event.error.message);
+            } else if (paymentMessage && paymentMessage.classList.contains('payment-status--error')) {
+              setPaymentMessage(null);
+            }
+            checkPaymentForm();
+          });
+        }
+        if (!stripeClient) return null;
+        if (!stripeElements){
+          stripeElements = stripeClient.elements({
+            appearance: {
+              theme: 'flat',
+              variables: {
+                colorText: '#204029',
+                colorPrimary: '#AF9525',
+                fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                borderRadius: '12px',
+              },
+            },
+          });
+        }
+        if (!stripeCardElement && cardElementTarget){
+          stripeCardElement = stripeElements.create('card', {
+            style: {
+              base: {
+                color: '#204029',
+                fontFamily: 'Inter, "Segoe UI", sans-serif',
+                fontSize: '16px',
+                '::placeholder': { color: 'rgba(77,77,77,.55)' },
+                iconColor: '#AF9525',
+              },
+              invalid: { color: '#d6453d' },
+            },
+          });
+          stripeCardElement.mount('#cardElement');
+          stripeCardElement.on('change', (event) => {
+            stripeCardComplete = Boolean(event.complete);
+            if (event.error) {
+              setPaymentMessage('error', event.error.message);
+            } else if (paymentMessage && paymentMessage.classList.contains('payment-status--error')) {
+              setPaymentMessage(null);
+            }
+            checkPaymentForm();
+          });
+        }
+        return stripeClient;
+      }
+
+      function updateCartUI(data){
+        if(!data) return;
+        cartState = data;
+        const count = Number(data.count || 0);
+        if(cartCount){ cartCount.textContent = count; }
+        if(floatingCartCount){ floatingCartCount.textContent = count; }
+        if(floatingCartBtn){
+          const hasItems = count > 0;
+          floatingCartBtn.classList.toggle('floating-cart--visible', hasItems);
+          floatingCartBtn.setAttribute('aria-hidden', hasItems ? 'false' : 'true');
+          floatingCartBtn.tabIndex = hasItems ? 0 : -1;
+        }
+
+        const items = Array.isArray(data.items) ? data.items : [];
+        if(cartItems){
+          cartItems.innerHTML='';
+          if(items.length){
+            cartItems.style.display='flex';
+            items.forEach(item=>{
+              const row=document.createElement('div');
+              row.className='cart-item';
+              row.dataset.itemId=item.id;
+
+              const info=document.createElement('div');
+              info.className='cart-item__info';
+
+              const rawName = item?.service?.name || '';
+              const translatedName = translateServiceNameText(rawName) || translate('common.service', null, 'Service');
+              const title=document.createElement('strong');
+              title.textContent=translatedName;
+              info.appendChild(title);
+
+              const meta=document.createElement('div');
+              meta.className='cart-item__meta';
+              const masterName=item?.master?.name || '-';
+              const timeLabel=item?.start_time ? fmtDateTime(item.start_time) : translate('common.noTime', null, 'No time');
+              const duration=item?.service?.duration_min || 0;
+              meta.textContent=`${masterName} · ${timeLabel} · ${formatMinutes(duration)}`;
+              info.appendChild(meta);
+
+              if(item?.service?.price){
+                const price=document.createElement('div');
+                price.className='cart-item__meta';
+                price.textContent=`$${item.service.price}`;
+                info.appendChild(price);
+              }
+
+              row.appendChild(info);
+
+              const remove=document.createElement('button');
+              remove.type='button';
+              remove.className='cart-remove';
+              remove.dataset.removeId=item.id;
+              remove.innerHTML='×';
+              remove.setAttribute('aria-label', translate('services.cart.remove', null, 'Remove item'));
+              row.appendChild(remove);
+
+              cartItems.appendChild(row);
+            });
+          }else{
+            cartItems.style.display='none';
+          }
+      }
+      
+      if(cartEmpty){ cartEmpty.style.display = items.length ? 'none' : 'block'; }
+      if(cartCheckout){ cartCheckout.disabled = !items.length; }
+
+      if(cartSummary){
+        const raw = data.total_price;
+        const num = Number(raw);
+        const formatted = Number.isFinite(num) ? num.toFixed(2) : (raw || '0.00');
+        const duration = data.total_duration_min || 0;
+        const durationText = formatMinutes(duration);
+        setTextKey(cartSummary, 'services.cart.summary', {
+          total: `$${formatted}`,
+          duration: durationText
+        }, `Total: $${formatted} · ${durationText}`);
+      }
+    }
+
+      if (I18N && typeof I18N.onChange === 'function') {
+        I18N.onChange(() => {
+          applyServiceNameTranslations();
+          if (elServiceName && elServiceName.getAttribute('data-service-name-original')) {
+            elServiceName.textContent = translateServiceNameText(elServiceName.getAttribute('data-service-name-original'));
+          }
+          if (cartState) {
+            updateCartUI(cartState);
+          }
+          if (summaryState && summaryState.key) {
+            setTextKey(elSummary, summaryState.key, summaryState.vars);
+          }
+          if (modal.classList.contains('modal--open')) {
+            renderWindow().catch(()=>{});
+          }
+        });
+      }
+
+      async function refreshCart(silent=true){
+        if(!isAuth) return;
+        try{
+          const resp=await fetch(apiCart, {credentials:'same-origin'});
+          if(resp.status===401){
+            if(cartCount) cartCount.textContent='0';
+            if(floatingCartCount) floatingCartCount.textContent='0';
+            if(floatingCartBtn){
+              floatingCartBtn.classList.remove('floating-cart--visible');
+              floatingCartBtn.setAttribute('aria-hidden','true');
+              floatingCartBtn.tabIndex = -1;
+            }
+            return;
+          }
+          if(!resp.ok) throw new Error(translate('services.cart.loadFailed'));
+          const data=await resp.json();
+          updateCartUI(data);
+          if(!silent) setCartMessage(null);
+        }catch(err){
+          if(!silent){
+            setCartMessage('error', 'services.cart.loadFailed');
+            console.error(err);
+          }
+        }
+      }
+
+      async function removeCartItem(id){
+        if(!id) return;
+        try{
+          const resp=await fetch(cartRemoveUrl(id),{
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCookie('csrftoken')},
+            credentials:'same-origin',
+            body:JSON.stringify({})
+          });
+          const data=await resp.json().catch(()=>({}));
+          if(!resp.ok){
+            const message = data && (data.error || data.detail);
+            throw new Error(message || translate('services.cart.removeFailed'));
+          }
+          setCartMessage('success','services.cart.removeSuccess');
+          await refreshCart(true);
+        }catch(err){
+          const fallback = err && err.message;
+          const defaultMessage = translate('services.cart.removeFailed');
+          if(fallback && fallback !== defaultMessage){
+            setCartMessage('error', null, null, fallback);
+          }else{
+            setCartMessage('error','services.cart.removeFailed');
+          }
+        }
+      }
+
+      async function checkoutCart(){
+        if(!cartState.items || !cartState.items.length) return;
+        if(cartCheckout) cartCheckout.disabled=true;
+        setCartMessage(null);
+        try{
+          const resp=await fetch(apiCartCheckout,{
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCookie('csrftoken')},
+            credentials:'same-origin',
+            body:JSON.stringify({})
+          });
+          const data=await resp.json().catch(()=>({}));
+          if(!resp.ok){
+            const msg=(data&&(data.error||data.detail))?(data.error||data.detail):translate('services.cart.checkoutFailed');
+            throw new Error(msg);
+          }
+          await refreshCart(true);
+          // Temporary bypass: skip payment modal while backend flow is adjusted.
+          setCartMessage('success','services.cart.checkoutSuccess');
+          if(cartCheckout) cartCheckout.disabled=false;
+          setTimeout(()=>{ window.location.href='/accounts/dashboard/'; }, 600);
+          return;
+        }catch(err){
+          const fallback = err && err.message;
+          const defaultMessage = translate('services.cart.checkoutFailed');
+          if(fallback && fallback !== defaultMessage){
+            setCartMessage('error', null, null, fallback);
+          }else{
+            setCartMessage('error','services.cart.checkoutFailed');
+          }
+          if(cartCheckout) cartCheckout.disabled=false;
+        }
+      }
+
+      async function openCartModal(){
+        closeMenuDrawer();
+        if(!isAuth){ window.location=loginUrl; return; }
+        setCartMessage(null);
+        if(cartModal){
+          openModalElement(cartModal);
+        }
+        await refreshCart(true);
+      }
+
+      function closeCartModal(){
+        if(cartModal){ closeModalElement(cartModal); }
+        setCartMessage(null);
+      }
+
+      function openPaymentModal(context){
+        if(!context || !context.payment) return;
+        currentPaymentContext = context;
+        resetPaymentForm();
+
+        const amountText = formatCurrency(context.payment.amount, context.payment.currency);
+        if (paymentSummary) {
+          paymentSummary.textContent = PAYMENT_COPY.summary(amountText);
+        }
+        if (paymentSummaryAmount) {
+          paymentSummaryAmount.textContent = amountText;
+        }
+
+        const appointmentData = context.appointment || {};
+        const items = Array.isArray(appointmentData.items) ? appointmentData.items : [];
+        const primaryStart = appointmentData.start_time || items[0]?.start_time;
+        if (paymentSummaryTime) {
+          paymentSummaryTime.textContent = primaryStart ? fmtDateTime(primaryStart) : '—';
+        }
+        if (paymentSummaryItems) {
+          paymentSummaryItems.innerHTML = '';
+          if (items.length) {
+            items.forEach((it) => {
+              const chip = document.createElement('div');
+              chip.className = 'payment-panel__chip';
+              const title = document.createElement('span');
+              title.textContent = it?.service?.name || 'Service';
+              const meta = document.createElement('div');
+              meta.className = 'payment-panel__meta';
+              const masterName = it?.master?.name || it?.master?.user?.full_name || it?.master?.user?.username || 'Master';
+              const slot = it?.start_time ? fmtDateTime(it.start_time) : 'Scheduled';
+              meta.textContent = `${masterName} · ${slot}`;
+              chip.appendChild(title);
+              chip.appendChild(meta);
+              paymentSummaryItems.appendChild(chip);
+            });
+          } else {
+            const empty = document.createElement('div');
+            empty.className = 'payment-panel__meta';
+            empty.textContent = 'Service details will appear here once confirmed.';
+            paymentSummaryItems.appendChild(empty);
+          }
+        }
+
+        const needCard = Boolean(context.payment.client_secret);
+        const amountNumeric = Number(context.payment.amount || 0);
+        const zeroDue = !Number.isNaN(amountNumeric) && amountNumeric <= 0;
+        if (needCard) {
+          stripeCardComplete = false;
+          cardElementWrapper?.classList.add('is-visible');
+          const stripe = ensureStripe();
+          if (!stripe) {
+            setPaymentMessage('error', PAYMENT_COPY.missingKey);
+          } else {
+            setPaymentMessage('status', PAYMENT_COPY.enterCard);
+          }
+          if (paymentConfirm) {
+            paymentConfirm.disabled = !stripe;
+            paymentConfirm.textContent = 'Pay now';
+          }
+          setTimeout(() => { stripeCardElement?.focus(); }, 120);
+        } else {
+          stripeCardComplete = true;
+          if (paymentConfirm) {
+            paymentConfirm.disabled = false;
+            paymentConfirm.textContent = 'Confirm booking';
+          }
+          cardElementWrapper?.classList.remove('is-visible');
+          if (zeroDue) {
+            setPaymentMessage('success', PAYMENT_COPY.noCharge(amountText));
+          } else {
+            setPaymentMessage('status', PAYMENT_COPY.offline(amountText));
+          }
+        }
+
+        if (paymentModal) {
+          openModalElement(paymentModal);
+        }
+
+        checkPaymentForm();
+      }
+
+      function closePaymentModal(){
+        if(paymentModal){ closeModalElement(paymentModal); }
+        setPaymentMessage(null);
+        resetPaymentForm();
+        currentPaymentContext = null;
+      }
+
+      function redirectAfterPayment(){
+        window.setTimeout(()=>{ window.location.href='/accounts/dashboard/'; }, 1200);
+      }
+
+      async function verifyPayment(apptId, intentId){
+        if(!apptId || !intentId) return;
+        try{
+          const resp = await fetch(paymentVerifyUrl(apptId), {
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCookie('csrftoken')},
+            credentials:'same-origin',
+            body:JSON.stringify({payment_intent_id:intentId})
+          });
+          const data = await resp.json().catch(()=>({}));
+          if(!resp.ok){
+            throw new Error((data && data.error) || PAYMENT_COPY.verifyFailed);
+          }
+
+          const status = data?.payment?.status;
+          if (status === 'processing' || status === 'requires_action' || status === 'requires_confirmation'){
+            setPaymentMessage('status', PAYMENT_COPY.processing);
+            window.setTimeout(()=>verifyPayment(apptId, intentId), 1500);
+            return;
+          }
+
+          if (status !== 'succeeded'){
+            throw new Error(PAYMENT_COPY.failedGeneric);
+          }
+
+          setPaymentMessage('success', PAYMENT_COPY.success);
+          setConfirmLoading(false);
+          if (paymentConfirm) paymentConfirm.disabled = true;
+          redirectAfterPayment();
+        }catch(err){
+          const msg = err && err.message ? err.message : PAYMENT_COPY.failedShort;
+          setPaymentMessage('error', msg);
+          setConfirmLoading(false);
+        }
+      }
+
+      async function confirmPayment(){
+        if (!currentPaymentContext || !currentPaymentContext.payment) return;
+        const { payment, appointment } = currentPaymentContext;
+        if (!payment.client_secret){
+          setPaymentMessage('success', PAYMENT_COPY.success);
+          setConfirmLoading(false);
+          redirectAfterPayment();
+          return;
+        }
+        const stripe = ensureStripe();
+        if (!stripe){
+          setPaymentMessage('error', PAYMENT_COPY.missingKey);
+          return;
+        }
+        const details = gatherBillingDetails();
+        if (!emailRegex.test(details.email || '')){
+          setPaymentMessage('error', 'Please provide a valid email address for your receipt.');
+          checkPaymentForm();
+          return;
+        }
+        setConfirmLoading(true);
+        setPaymentMessage('status', PAYMENT_COPY.processing);
+        try{
+          const result = await stripe.confirmCardPayment(payment.client_secret, {
+            payment_method: {
+              card: stripeCardElement,
+              billing_details: {
+                name: details.name || undefined,
+                email: details.email || undefined,
+                address: {
+                  line1: details.address.line1 || undefined,
+                  line2: details.address.line2 || undefined,
+                  city: details.address.city || undefined,
+                  state: details.address.state || undefined,
+                  postal_code: details.address.postal_code || undefined,
+                  country: details.address.country || undefined,
+                },
+              },
+            },
+            receipt_email: details.email || undefined,
+          });
+          if (result.error){
+            throw new Error(result.error.message || PAYMENT_COPY.failedGeneric);
+          }
+          await verifyPayment(appointment.id, payment.payment_intent_id || result.paymentIntent?.id);
+        }catch(err){
+          const msg = err && err.message ? err.message : PAYMENT_COPY.failedShort;
+          setPaymentMessage('error', msg);
+          setConfirmLoading(false);
+        }
+      }
+
+      // outlook
+      const olGrid=document.getElementById('olGrid');
+      const olWrap=document.getElementById('olWrap');
+      const olRange=document.getElementById('olRange');
+      const olPrev=document.getElementById('olPrev');
+      const olNext=document.getElementById('olNext');
+      const olToday=document.getElementById('olToday');
+      const mobileScheduleContainer = document.getElementById('bookMobile');
+      const mobileDateInput = document.getElementById('bookMobileDate');
+      const mobileTimeList = document.getElementById('bookMobileTimes');
+      const mobileEmpty = document.getElementById('bookMobileEmpty');
+
+      // ===== state =====
+      const WINDOW_DAYS = 14;
+      const START_HOUR  = 6;
+      const END_HOUR    = 23;
+      const STEP_MIN    = 30;
+
+      let current={ serviceId:null, serviceName:'', masterId:null, slot:null, mastersData:[] };
+      let baseStart = new Date(); baseStart.setHours(0,0,0,0);
+      let availabilityCache = new Map(); // dateStr -> { set:Set(HH:MM), iso:Map(HH:MM->ISO) }
+      let scheduleState = {
+        days: [],
+        dayData: [],
+        timeRows: [],
+        locale: getLocale(),
+        selectedDate: null,
+      };
+
+      // ===== open/close =====
+      function openModal(serviceId, serviceName){
+        if(!isAuth){ window.location=loginUrl; return; }
+        current={ serviceId, serviceName, masterId:null, slot:null, mastersData:[] };
+        if (elServiceName) {
+          elServiceName.setAttribute('data-service-name-original', serviceName || '');
+          elServiceName.textContent = translateServiceNameText(serviceName);
+        }
+        elError.style.display='none'; elSuccess.style.display='none';
+        clearTextKey(elError); clearTextKey(elSuccess);
+        btnSubmit.disabled=true;
+        summaryState = { key: 'services.modal.summaryPlaceholder', vars: null };
+        setTextKey(elSummary, 'services.modal.summaryPlaceholder');
+        resetSelection();
+
+        availabilityCache.clear();
+        baseStart = new Date(); baseStart.setHours(0,0,0,0);
+        scheduleState = {
+          days: [],
+          dayData: [],
+          timeRows: [],
+          locale: getLocale(),
+          selectedDate: null,
+        };
+        if (mobileTimeList) mobileTimeList.innerHTML = '';
+        if (mobileEmpty) mobileEmpty.style.display = 'none';
+        if (mobileDateInput){
+          mobileDateInput.value = '';
+          mobileDateInput.disabled = true;
+        }
+
+        openModalElement(modal);
+        loadMastersAndRender();
+      }
+      function closeModal(){ closeModalElement(modal); }
+
+      // ===== availability by day/master =====
+      async function fetchAvailability(dayISO, masterId){
+        const params = new URLSearchParams({ service: current.serviceId, date: dayISO });
+        if (masterId) params.set('master', masterId);
+        const r = await fetch(`${apiAvail}?${params.toString()}`, {credentials:'same-origin'});
+        if(!r.ok) throw new Error(translate('services.modal.errorLoad'));
+        const data = await r.json();
+
+        let slots = [];
+        if (masterId){
+          const m = (data.masters||[]).find(x => Number(x.id)===Number(masterId));
+          slots = m ? (m.slots||[]) : [];
+        }else{
+          slots = (data.masters && data.masters[0] && data.masters[0].slots) ? data.masters[0].slots : [];
+        }
+
+        const set = new Set(); const map = new Map();
+        slots.forEach(iso=>{
+          const d=parseISO(iso); if(!d) return;
+          const key=`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+          set.add(key); if(!map.has(key)) map.set(key, iso);
+        });
+        return {set, map, raw:data};
+      }
+
+      async function ensureRangeLoaded(startDate, daysCount){
+        const tasks=[];
+        for(let i=0;i<daysCount;i++){
+          const d=new Date(startDate); d.setDate(d.getDate()+i);
+          const ds=ymd(d);
+          if(!availabilityCache.has(ds)){
+            tasks.push((async()=>{
+              availabilityCache.set(ds, {loading:true});
+              const res=await fetchAvailability(ds, Number(elMaster.value||current.masterId));
+              availabilityCache.set(ds,{set:res.set, iso:res.map});
+            })());
+          }
+        }
+        if (tasks.length) await Promise.allSettled(tasks);
+      }
+
+      function buildTimeRows(extraSets){
+        const out=[];
+        for(let h=START_HOUR;h<=END_HOUR;h++){
+          for(let m=0;m<60;m+=STEP_MIN){
+            out.push(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`);
+          }
+        }
+        (extraSets||[]).forEach(s=>s && s.forEach(t=>{ if(!out.includes(t)) out.push(t); }));
+        return out.sort();
+      }
+
+      function applySelection(day, iso, locale){
+        if (!iso || !day) return;
+        current.masterId = Number(elMaster?.value || current.masterId || 0);
+        current.slot = iso;
+        const masterText = elMaster?.selectedOptions[0]?.text || '';
+        const timeText = fmtHM(new Date(iso));
+        const dateText = day.toLocaleDateString(locale);
+        const summaryVars = { master: masterText, time: timeText, date: dateText };
+        summaryState = { key: 'services.modal.summarySelected', vars: summaryVars };
+        setTextKey(elSummary, 'services.modal.summarySelected', summaryVars, `Master: ${masterText}. Time: ${timeText}, ${dateText}.`);
+        btnSubmit.disabled = false;
+      }
+
+      function resetSelection(){
+        current.slot = null;
+        summaryState = { key: 'services.modal.summaryPlaceholder', vars: null };
+        setTextKey(elSummary, 'services.modal.summaryPlaceholder');
+        btnSubmit.disabled = true;
+      }
+
+      function selectSlot(day, iso, locale){
+        if (!iso || !day) return;
+        scheduleState.selectedDate = ymd(day);
+        applySelection(day, iso, locale);
+        renderDesktopSchedule(locale);
+        renderMobileSchedule(locale);
+      }
+
+      async function loadMastersAndRender(){
+        elError.style.display='none';
+        resetSelection();
+        try{
+          const first = await fetchAvailability(ymd(baseStart), null);
+          const masters = (first.raw && first.raw.masters) || [];
+          current.mastersData = masters;
+
+          elMaster.innerHTML='';
+          if(masters.length===0){
+            const opt=document.createElement('option');
+            opt.value='';
+            opt.textContent = translate('services.modal.noMasters', null, 'No masters available');
+            elMaster.appendChild(opt);
+            olGrid.innerHTML=`<div class="p-4 text-sm text-center">${translate('services.modal.noAvailability', null, 'No availability')}</div>`;
+            if (mobileTimeList) mobileTimeList.innerHTML='';
+            if (mobileEmpty){
+              mobileEmpty.style.display='block';
+              setTextKey(mobileEmpty, 'services.modal.noAvailability', null, 'No availability yet.');
+            }
+            if (mobileDateInput){
+              mobileDateInput.value='';
+              mobileDateInput.disabled=true;
+            }
+            btnSubmit.disabled = true;
+            return;
+          }
+          masters.forEach(m=>{
+            const opt=document.createElement('option'); opt.value=m.id; opt.textContent=m.name; elMaster.appendChild(opt);
+          });
+          const withSlots=masters.find(m=>(m.slots||[]).length);
+          elMaster.value=(withSlots?withSlots.id:masters[0].id);
+          current.masterId=Number(elMaster.value);
+
+          availabilityCache.clear();
+          await renderWindow();
+        }catch(err){
+          const fallback = err && err.message;
+          const defaultMsg = translate('services.modal.errorLoad');
+          elError.style.display='block';
+          if(fallback && fallback !== defaultMsg){
+            clearTextKey(elError);
+            elError.textContent=fallback;
+          }else{
+            setTextKey(elError, 'services.modal.errorLoad');
+          }
+        }
+      }
+
+      async function renderWindow(){
+        await ensureRangeLoaded(baseStart, WINDOW_DAYS);
+
+        const locale = getLocale();
+
+        const days = Array.from({length:WINDOW_DAYS}, (_,i)=>{ const d=new Date(baseStart); d.setDate(d.getDate()+i); return d;});
+        const dayStrs=days.map(ymd);
+        const dayData = dayStrs.map(ds => availabilityCache.get(ds));
+        const timeRows = buildTimeRows(dayData.map(x=>x?.set));
+
+        scheduleState.days = days;
+        scheduleState.dayData = dayData;
+        scheduleState.timeRows = timeRows;
+        scheduleState.locale = locale;
+
+        const firstDate = days[0] ? ymd(days[0]) : null;
+        const lastDate = days[days.length-1] ? ymd(days[days.length-1]) : null;
+
+        if (mobileDateInput){
+          mobileDateInput.disabled = !days.length;
+          mobileDateInput.min = firstDate || '';
+          mobileDateInput.max = lastDate || '';
+        }
+
+        let slotStillValid = false;
+        if (current.slot){
+          for (const data of dayData){
+            if (data && data.iso){
+              for (const value of data.iso.values()){
+                if (value === current.slot){
+                  slotStillValid = true;
+                  break;
+                }
+              }
+            }
+            if (slotStillValid) break;
+          }
+        }
+        if (!slotStillValid){
+          resetSelection();
+        }
+
+        if (!scheduleState.selectedDate || (firstDate && scheduleState.selectedDate < firstDate) || (lastDate && scheduleState.selectedDate > lastDate)){
+          scheduleState.selectedDate = null;
+        }
+
+        if (!scheduleState.selectedDate){
+          const firstAvailable = dayData.findIndex(data => data && data.set && data.set.size);
+          if (firstAvailable !== -1){
+            scheduleState.selectedDate = ymd(days[firstAvailable]);
+          } else if (firstDate){
+            scheduleState.selectedDate = firstDate;
+          }
+        }
+
+        if (mobileDateInput && scheduleState.selectedDate){
+          mobileDateInput.value = scheduleState.selectedDate;
+        }
+
+        renderDesktopSchedule(locale);
+        renderMobileSchedule(locale);
+      }
+
+      function renderDesktopSchedule(locale = scheduleState.locale || getLocale()){
+        if (!olGrid) return;
+        const days = scheduleState.days;
+        const dayData = scheduleState.dayData;
+        const timeRows = scheduleState.timeRows;
+
+        if (!days.length){
+          olGrid.innerHTML = '';
+          if (olRange) olRange.textContent = '—';
+          btnSubmit.disabled = true;
+          return;
+        }
+
+        const from = days[0].toLocaleDateString(locale, {month:'short', day:'numeric'});
+        const to   = days[days.length-1].toLocaleDateString(locale, {month:'short', day:'numeric'});
+        if (olRange) olRange.textContent = `${from} – ${to}`;
+        olGrid.style.setProperty('--days', String(WINDOW_DAYS));
+        olGrid.innerHTML='';
+
+        const headTime = document.createElement('div');
+        headTime.className='outlook__cell outlook__head time';
+        olGrid.appendChild(headTime);
+
+        const todayStr = (new Date()).toDateString();
+        const selectedDateStr = scheduleState.selectedDate;
+
+        days.forEach(d=>{
+          const header=document.createElement('div');
+          header.className='outlook__cell outlook__head';
+          if (todayStr === d.toDateString()) header.classList.add('day--today');
+          if (selectedDateStr && selectedDateStr === ymd(d)) header.classList.add('day--selected');
+          header.innerHTML = `<div class="day-head">
+            <div class="day-title">${d.toLocaleDateString(locale, {weekday:'long'})}</div>
+            <div class="day-sub">${d.toLocaleDateString(locale, {month:'short', day:'numeric'})}</div>
+          </div>`;
+          olGrid.appendChild(header);
+        });
+
+        timeRows.forEach(t=>{
+          const [hh,mm]=t.split(':').map(n=>parseInt(n,10));
+          const fake=new Date(); fake.setHours(hh,mm,0,0);
+          const tcell=document.createElement('div'); tcell.className='outlook__cell time'; tcell.textContent=fmtHM(fake);
+          olGrid.appendChild(tcell);
+
+          days.forEach((d,idx)=>{
+            const cell=document.createElement('div');
+            cell.className='outlook__cell';
+            const data = dayData[idx];
+            const isFree = data?.set?.has(t);
+            const chip=document.createElement('button');
+            chip.type='button';
+            chip.className='slot-chip ' + (isFree?'slot-free':'slot-busy');
+            chip.textContent=fmtHM(fake);
+            chip.disabled = !isFree;
+
+            if(isFree){
+              const iso = data.iso.get(t);
+              if (iso === current.slot){
+                chip.classList.add('slot-selected');
+              }
+              chip.addEventListener('click', ()=>{
+                selectSlot(d, iso, locale);
+              });
+            }
+            cell.appendChild(chip);
+            olGrid.appendChild(cell);
+          });
+        });
+
+        if (olWrap){
+          const selected = olGrid.querySelector('.slot-selected');
+          if (selected){
+            selected.scrollIntoView({ block:'nearest', inline:'center' });
+          }else{
+            const todayIdx = days.findIndex(x=>x.toDateString()===todayStr);
+            if (todayIdx>0){
+              const colWidth = 160;
+              olWrap.scrollLeft = Math.max(todayIdx * colWidth - colWidth, 0);
+            } else {
+              olWrap.scrollLeft = 0;
+            }
+          }
+        }
+      }
+
+      function renderMobileSchedule(locale = scheduleState.locale || getLocale()){
+        if (!mobileScheduleContainer || !mobileTimeList) return;
+        const days = scheduleState.days;
+        const dayData = scheduleState.dayData;
+
+        mobileTimeList.innerHTML = '';
+
+        if (!days.length){
+          if (mobileEmpty){
+            mobileEmpty.style.display = 'block';
+            setTextKey(mobileEmpty, 'services.modal.noAvailability', null, 'No availability yet.');
+          }
+          return;
+        }
+
+        if (mobileEmpty){
+          mobileEmpty.style.display = 'none';
+        }
+
+        const selectedDateStr = scheduleState.selectedDate;
+        const selectedDayIndex = days.findIndex(d => ymd(d) === selectedDateStr);
+        const fallbackIndex = days.findIndex((_, idx) => dayData[idx] && dayData[idx].set && dayData[idx].set.size);
+        const useIndex = selectedDayIndex !== -1 ? selectedDayIndex : (fallbackIndex !== -1 ? fallbackIndex : 0);
+        const day = days[useIndex];
+        const dayKey = day ? ymd(day) : null;
+        if (dayKey && scheduleState.selectedDate !== dayKey){
+          scheduleState.selectedDate = dayKey;
+          if (mobileDateInput) mobileDateInput.value = dayKey;
+        }
+
+        if (mobileDateInput && scheduleState.selectedDate){
+          mobileDateInput.value = scheduleState.selectedDate;
+        }
+
+        const data = day ? dayData[useIndex] : null;
+        if (!data || !data.set || !data.set.size){
+          if (mobileEmpty){
+            mobileEmpty.style.display = 'block';
+            setTextKey(mobileEmpty, 'services.modal.noAvailabilityDay', null, 'No available times on this date.');
+          }
+          btnSubmit.disabled = true;
+          return;
+        }
+
+        if (mobileEmpty){
+          mobileEmpty.style.display = 'none';
+        }
+
+        const times = Array.from(data.set).sort();
+        times.forEach(timeKey => {
+          const iso = data.iso.get(timeKey);
+          if (!iso) return;
+          const btn=document.createElement('button');
+          btn.type='button';
+          btn.className='book-mobile__time';
+          btn.textContent = fmtHM(new Date(iso));
+          if (iso === current.slot){
+            btn.classList.add('is-selected');
+          }
+          btn.addEventListener('click', ()=>{
+            selectSlot(day, iso, locale);
+          });
+          mobileTimeList.appendChild(btn);
+        });
+
+        if (!times.length){
+          if (mobileEmpty){
+            mobileEmpty.style.display = 'block';
+            setTextKey(mobileEmpty, 'services.modal.noAvailabilityDay', null, 'No available times on this date.');
+          }
+          btnSubmit.disabled = true;
+        } else if (!current.slot){
+          btnSubmit.disabled = true;
+        }
+      }
+
+      if (mobileDateInput){
+        mobileDateInput.addEventListener('change', ()=>{
+          const value = mobileDateInput.value;
+          scheduleState.selectedDate = value || null;
+          resetSelection();
+          renderDesktopSchedule(scheduleState.locale || getLocale());
+          renderMobileSchedule(scheduleState.locale || getLocale());
+        });
+      }
+
+      async function shiftWindow(deltaDays){
+        baseStart = new Date(baseStart); baseStart.setDate(baseStart.getDate() + deltaDays);
+        scheduleState.selectedDate = null;
+        resetSelection();
+        await renderWindow();
+      }
+      olPrev.addEventListener('click', ()=>shiftWindow(-WINDOW_DAYS));
+      olNext.addEventListener('click', ()=>shiftWindow(WINDOW_DAYS));
+      olToday.addEventListener('click', async ()=>{ baseStart = new Date(); baseStart.setHours(0,0,0,0); await renderWindow(); });
+
+      elMaster.addEventListener('change', async ()=>{
+        current.masterId = Number(elMaster.value);
+        current.slot = null; btnSubmit.disabled = true;
+        summaryState = { key: 'services.modal.summaryPlaceholder', vars: null };
+        setTextKey(elSummary, 'services.modal.summaryPlaceholder');
+        availabilityCache.clear();
+        scheduleState.selectedDate = null;
+        scheduleState.days = [];
+        scheduleState.dayData = [];
+        scheduleState.timeRows = [];
+        await renderWindow();
+      });
+
+      // ===== add to cart =====
+      async function addToCart(){
+        if(!current.serviceId||!current.masterId||!current.slot) return;
+        btnSubmit.disabled=true; elError.style.display='none'; elSuccess.style.display='none';
+        clearTextKey(elError); clearTextKey(elSuccess);
+        try{
+          const resp=await fetch(apiCartAdd,{
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCookie('csrftoken')},
+            credentials:'same-origin',
+            body:JSON.stringify({ service:current.serviceId, master:current.masterId, start_time:current.slot })
+          });
+          const data=await resp.json().catch(()=>({}));
+          if(!resp.ok){
+            const msg=(data&&(data.error||data.detail))?(data.error||data.detail):translate('services.modal.errorAdd');
+            throw new Error(msg);
+          }
+          setTextKey(elSuccess, 'services.modal.success');
+          elSuccess.style.display='block';
+          await refreshCart(true);
+          setTimeout(()=>{ closeModal(); }, 600);
+        }catch(err){
+          const fallback = err && err.message;
+          const defaultMsg = translate('services.modal.errorAdd');
+          elError.style.display='block';
+          if(fallback && fallback !== defaultMsg){
+            clearTextKey(elError);
+            elError.textContent = fallback;
+          }else{
+            setTextKey(elError, 'services.modal.errorAdd');
+          }
+        }finally{
+          btnSubmit.disabled=false;
+        }
+      }
+
+      // ===== wire up =====
+      document.addEventListener('click',(e)=>{
+        const btn=e.target.closest('.book-btn'); if(btn){
+          openModal(btn.dataset.serviceId, btn.dataset.serviceName || translate('common.service', null, 'Service'));
+        }
+      });
+      btnClose.addEventListener('click',closeModal);
+      btnCancel.addEventListener('click',closeModal);
+      modal.addEventListener('click',(e)=>{ if(e.target===modal) closeModal(); });
+      btnSubmit.addEventListener('click',addToCart);
+
+      if(cartBtn){
+        cartBtn.addEventListener('click', openCartModal);
+      }
+      if(floatingCartBtn){ floatingCartBtn.addEventListener('click', openCartModal); }
+      if(cartClose){ cartClose.addEventListener('click', closeCartModal); }
+      if(cartModal){ cartModal.addEventListener('click',(e)=>{ if(e.target===cartModal) closeCartModal(); }); }
+      if(cartItems){
+        cartItems.addEventListener('click',(e)=>{
+          const btn=e.target.closest('.cart-remove');
+          if(btn){
+            const id=btn.dataset.removeId;
+            btn.disabled=true;
+            removeCartItem(id).finally(()=>{ btn.disabled=false; });
+          }
+        });
+      }
+      if (paymentTitle) paymentTitle.textContent = PAYMENT_COPY.title;
+      if (paymentSummary) paymentSummary.textContent = PAYMENT_COPY.summary('CA$0.00');
+      if (paymentSummaryAmount) paymentSummaryAmount.textContent = 'CA$0.00';
+      if (paymentSummaryTime) paymentSummaryTime.textContent = '—';
+      if (paymentSummaryItems) {
+        paymentSummaryItems.innerHTML = '<div class="payment-panel__meta">Service details will appear here once confirmed.</div>';
+      }
+
+      if(cartCheckout){ cartCheckout.addEventListener('click', checkoutCart); }
+      if(paymentClose){ paymentClose.addEventListener('click', closePaymentModal); }
+      if(paymentModal){ paymentModal.addEventListener('click',(e)=>{ if(e.target===paymentModal) closePaymentModal(); }); }
+      if(paymentConfirm){ paymentConfirm.addEventListener('click', confirmPayment); }
+
+      const paymentInputs = [
+        inputName,
+        inputEmail,
+        inputAddress1,
+        inputAddress2,
+        inputCity,
+        inputState,
+        inputPostal,
+        inputCountry,
+      ].filter(Boolean);
+      paymentInputs.forEach((input) => {
+        const handler = () => {
+          if (input === inputPostal) {
+            input.value = normalizePostal(input.value);
+          }
+          checkPaymentForm();
+        };
+        input.addEventListener('input', handler);
+        input.addEventListener('blur', handler);
+      });
+
+      if (paymentTitle) paymentTitle.textContent = PAYMENT_COPY.title;
+      if (paymentConfirm) paymentConfirm.textContent = 'Pay now';
+      if (paymentCardLabel) paymentCardLabel.textContent = 'Card details';
+      if (paymentSummary) paymentSummary.textContent = PAYMENT_COPY.summary('$0');
+
+      // UX: Shift+wheel горизонтально
+      if (olWrap){
+        olWrap.addEventListener('wheel', (e)=>{
+          if (e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+            e.preventDefault(); olWrap.scrollLeft += e.deltaY;
+          }
+        }, { passive:false });
+      }
+
+      if(isAuth){
+        refreshCart(true);
+      } else {
+        if(cartCount) cartCount.textContent='0';
+        if(floatingCartCount) floatingCartCount.textContent='0';
+        if(floatingCartBtn){
+          floatingCartBtn.classList.remove('floating-cart--visible');
+          floatingCartBtn.setAttribute('aria-hidden','true');
+          floatingCartBtn.tabIndex = -1;
+        }
+      }
+
+      /* ===== Live search ===== */
+      const searchForm = document.querySelector('form.filters');
+      const qInput = document.querySelector('input[name="q"]');
+      const catSel = document.querySelector('select[name="cat"]');
+      const resetLink = document.querySelector('[data-reset-link]');
+      const liveTitle = document.getElementById('liveTitle');
+      const liveGrid  = document.getElementById('liveGrid');
+      const serverContent = document.getElementById('serverContent');
+
+      const SEARCH_DELAY = 250;
+      let searchTimer = null;
+      let aborter = null;
+
+      function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+      function showLive(){ if(liveTitle) liveTitle.style.display='block'; if(liveGrid) liveGrid.style.display='grid'; if(serverContent) serverContent.style.display='none'; }
+      function hideLive(){ if(liveTitle) liveTitle.style.display='none'; if(liveGrid) liveGrid.style.display='none'; if(serverContent) serverContent.style.display='block'; }
+      function skeleton(n=8){
+        return Array.from({length:n}).map(()=>`
+          <article class="service-card">
+            <div class="service-card__img service-card__img--empty skeleton"></div>
+            <div class="skeleton" style="height:18px;margin-top:10px;border-radius:6px;"></div>
+            <div class="skeleton" style="height:14px;margin-top:6px;border-radius:6px;"></div>
+            <div class="skeleton" style="height:36px;margin-top:12px;border-radius:10px;"></div>
+          </article>`).join('');
+      }
+      function toggleReset(q, cat){
+        if (!resetLink) return;
+        const shouldShow = Boolean(q) || Boolean(cat);
+        if (shouldShow){
+          resetLink.style.display = '';
+          resetLink.removeAttribute('aria-hidden');
+        } else {
+          resetLink.style.display = 'none';
+          resetLink.setAttribute('aria-hidden', 'true');
+        }
+      }
+      function updateLocation(q, cat){
+        if (!window.history || typeof window.history.replaceState !== 'function') return;
+        const nextUrl = new URL(window.location.href);
+        if (q) nextUrl.searchParams.set('q', q); else nextUrl.searchParams.delete('q');
+        if (cat) nextUrl.searchParams.set('cat', cat); else nextUrl.searchParams.delete('cat');
+        window.history.replaceState(null, document.title, nextUrl.toString());
+      }
+      function abortActiveRequest(){
+        if (aborter){
+          aborter.abort();
+          aborter = null;
+        }
+      }
+      function cardHTML(s){
+        const hasDisc = Number.isFinite(+s.discount_percent) && +s.discount_percent > 0;
+        const rawName = s.name || '';
+        const translatedName = translateServiceNameText(rawName);
+        const fallbackImgLabel = translate('services.cards.noImage', null, 'Preview coming soon');
+        const imageAlt = s.image_alt || rawName || translate('services.cards.imageAltFallback', null, 'Service preview');
+        const imageBlock = s.image
+          ? `<div class="service-card__img"><img src="${escapeHtml(s.image)}" alt="${escapeHtml(imageAlt)}" loading="lazy"></div>`
+          : `<div class="service-card__img service-card__img--empty" aria-hidden="true">${escapeHtml(fallbackImgLabel)}</div>`;
+        const priceBlock = hasDisc
+          ? `<span class="old">$${escapeHtml(s.base_price)}</span>
+             <strong>$${escapeHtml(s.price)}</strong>
+             <span class="badge">-${escapeHtml(String(s.discount_percent))}%</span>`
+          : `<strong>$${escapeHtml(s.price || s.base_price)}</strong>`;
+        const desc = s.description ? `<p class="muted">${escapeHtml(s.description)}</p>` : '';
+        const cat  = s.category ? `<div class="muted">${escapeHtml(s.category)}</div>` : '';
+        const durationLabel = escapeHtml(formatMinutes(s.duration_min || 0));
+        return `
+          <article class="service-card">
+            ${imageBlock}
+            ${cat}
+            <h3 data-service-name-original="${escapeHtml(rawName)}">${escapeHtml(translatedName)}</h3>
+            ${desc}
+            <div class="service-meta">${priceBlock} · <span class="meta-duration">${durationLabel}</span></div>
+            <button class="btn btn--primary book-btn"
+              data-service-id="${escapeHtml(s.id)}"
+              data-service-name="${escapeHtml(rawName)}"
+              data-i18n="services.cards.addToCart">${translate('services.cards.addToCart')}</button>
+          </article>`;
+      }
+      async function fetchServices(q, cat){
+        abortActiveRequest();
+        const controller = new AbortController();
+        aborter = controller;
+        const params = new URLSearchParams();
+        if (q)   params.set('q', q);
+        if (cat) params.set('cat', cat);
+        const queryString = params.toString();
+        const url = queryString ? `/accounts/api/services/search/?${queryString}` : '/accounts/api/services/search/';
+        try{
+          const r = await fetch(url, { signal: controller.signal, credentials: 'same-origin' });
+          if (!r.ok) throw new Error(translate('services.search.loadFailed'));
+          return await r.json();
+        }finally{
+          if (aborter === controller) {
+            aborter = null;
+          }
+        }
+      }
+      async function executeSearch({ q, cat } = {}){
+        searchTimer = null;
+        if (!q && !cat){
+          abortActiveRequest();
+          hideLive();
+          return;
+        }
+        showLive();
+        if (liveGrid) liveGrid.innerHTML = skeleton();
+        try{
+          const data = await fetchServices(q, cat);
+          const items = (data && data.results) || [];
+          if (items.length === 0){
+            if (liveGrid) liveGrid.innerHTML = `<div class="stub" data-i18n="services.search.noResults">${translate('services.search.noResults')}</div>`;
+            queueRefresh();
+            return;
+          }
+          if (liveGrid) liveGrid.innerHTML = items.map(cardHTML).join('');
+          applyServiceNameTranslations(liveGrid);
+          queueRefresh();
+        }catch(e){
+          if (e && e.name === 'AbortError') return;
+          if (liveGrid) liveGrid.innerHTML = `<div class="stub" data-i18n="services.search.error">${translate('services.search.error')}</div>`;
+          queueRefresh();
+        }
+      }
+      function scheduleSearch(options = {}){
+        const { immediate = false, updateUrl = true } = options;
+        const state = {
+          q: qInput?.value?.trim() || '',
+          cat: catSel?.value || '',
+        };
+        toggleReset(state.q, state.cat);
+        if (updateUrl) updateLocation(state.q, state.cat);
+        if (searchTimer){
+          clearTimeout(searchTimer);
+          searchTimer = null;
+        }
+        const payload = { q: state.q, cat: state.cat };
+        if (!payload.q && !payload.cat){
+          executeSearch(payload);
+          return;
+        }
+        if (immediate){
+          executeSearch(payload);
+        }else{
+          searchTimer = window.setTimeout(()=>executeSearch(payload), SEARCH_DELAY);
+        }
+      }
+
+      toggleReset(qInput?.value?.trim() || '', catSel?.value || '');
+
+      if (qInput) qInput.addEventListener('input', ()=>scheduleSearch());
+      if (catSel) catSel.addEventListener('change', ()=>scheduleSearch({ immediate:true }));
+      if (searchForm){
+        searchForm.addEventListener('submit', (e)=>{
+          e.preventDefault();
+          scheduleSearch({ immediate:true });
+        });
+      }
+      if (resetLink){
+        resetLink.addEventListener('click', (e)=>{
+          e.preventDefault();
+          if (qInput) qInput.value = '';
+          if (catSel) catSel.value = '';
+          scheduleSearch({ immediate:true });
+          document.getElementById('services')?.scrollIntoView({behavior:'smooth', block:'start'});
+        });
+      }
+
+      applyServiceNameTranslations(document.getElementById('serverContent'));
+    });
+  </script>
+</body>
+</html>
